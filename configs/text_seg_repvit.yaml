@@ -1,0 +1,71 @@
+model:
+  target: training.train_textsam.TextSAM
+  base_learning_rate: 4.5e-5
+  params:
+    image_encoder_configs:
+      target: src.models.visual.image_encoder.repvit_m1_0
+    text_embedder_configs:
+      target: src.models.heads.textembedder # Placeholder, assuming similar architecture
+      params:
+        version: ckpts/bert
+        max_length: 256
+        d_model: 768
+        output_dim: 1024
+        local_pt: ckpts/pubmedbert.pt
+    maskformer_config:
+      target: src.models.maskformer.MaskFormer
+      params:
+        img_size: 64
+        patch_size: 4
+        in_chans: 256
+        embed_dim: 1024
+        depth: 4
+        num_heads: 8
+    loss_configs:
+      target: src.losses.total_loss.TotalLoss
+      params:
+        clip_loss_weight: 1.0
+        seg_loss_configs:
+          target: src.losses.medsam_loss.MedSamLoss
+          params:
+            reduction: "mean"
+        clip_loss_configs:
+          target: src.losses.clip_loss.CLIPLoss
+          params:
+            temperature: 0.07
+    image_size: 256
+    
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 5
+    num_workers: 8
+    train:
+      target: dataset.textseg.TextSeg
+      params:
+        data_dir: /root/autodl-tmp/dataset/train
+        text_label_path: /root/autodl-tmp/dataset/text_seg_class.json
+        image_size: 256
+        n_slicing: 9
+    # validation:
+    #   target: dataset.textseg.ValTextSeg
+    #   params:
+    #     img_dir: /root/autodl-tmp/dataset/val
+    #     gt_dir: /root/autodl-tmp/dataset/text_seg_class.json
+    #     image_size: 256
+        
+lightning:
+  callbacks:
+    image_logger:
+      target: utils.helper.ImageLogger
+      params:
+        batch_frequency: 200
+        max_images: 4
+        increase_log_steps: False
+  
+  trainer:
+    max_epochs: 100
+    accelerator: gpu
+    num_sanity_val_steps: 0
+    limit_val_batches: 0
+    num_nodes: 1
