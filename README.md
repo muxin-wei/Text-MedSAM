@@ -86,3 +86,19 @@ python train_one_gpu.py \
 
 ### Acknowledgement
 We thank the authors of [bowang-lab/MedSAM](https://github.com/bowang-lab/MedSAM/tree/LiteMedSAM) and [THU-MIG/RepViT](https://github.com/THU-MIG/RepViT/tree/main/model) for making their source code publicly available.
+
+1. 筛数据
+2. 基本满足任务
+3. 临床验证（大文章）
+4. **应用点**，**临床技术分析** （医学验证） intro 第一段 discussion，统计分析（可选），人机协同（可选），人机对抗（可选）临床介入
+
+输入：PET/CT，病理，
+输出：分割，cox（生存），分类，个性化（预后）
+
+伦理（内部数据）， （公开数据）
+
+数字孪生：怎么验证有效性（） 训练集，验证集 标准
+1. 复旦 技术文章、临床文章
+2. 公开数据集 -- 新的问题，
+
+3. 3-4个同类数据集 诊断、预后 （多中心）

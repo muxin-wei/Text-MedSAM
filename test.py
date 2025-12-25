@@ -1,5 +1,5 @@
 from src.dataset.utils import unpad_and_resize
-from src.dataset.textseg import TextSeg
+from src.dataset.textseg import TextSeg, TextSegVal
 from torch.utils.data import DataLoader
 from utils.helper import instantiate_from_config
 from omegaconf import OmegaConf
@@ -22,35 +22,59 @@ model = instantiate_from_config(config.model).to("cuda")
 
 
 ds = TextSeg(
-    data_dir='/root/autodl-tmp/dataset/train_10/CT',
+    data_dir='/root/autodl-tmp/dataset/train_sample',
     text_label_path = '/root/autodl-tmp/dataset/seg_class.json',
     n_slicing=8,
     image_size=256,
 )
-dl = DataLoader(ds, batch_size=2, shuffle=True, num_workers=12, )
+dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=8, )
 
+val_ds = TextSegVal(
+    data_dir='/root/autodl-tmp/dataset/train_sample',
+    text_label_path = '/root/autodl-tmp/dataset/seg_class.json',
+    image_size=256,
+)
+val_dl = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=8,)
 
 opts, schedulers = model.configure_optimizers()
 opt = opts[0]
 device = torch.device("cuda")
-batch = next(iter(dl))
-
+train_batch = next(iter(dl))
+for k, v in train_batch.items():
+    if isinstance(v, torch.Tensor):
+        train_batch[k] = v.to(device)
+        
+val_batch = next(iter(val_dl))
+for k, v in val_batch.items():
+    if isinstance(v, torch.Tensor):
+        val_batch[k] = v.to(device)
 
 step_id = 0
 model.train()
+
 while True:
-    for k, v in batch.items():
-        if isinstance(v, torch.Tensor):
-            batch[k] = v.to(device)
     opt.zero_grad()
-    loss, log_dict, segs = model.training_step(batch, step_id)
+    loss, log_dict, segs = model.training_step(train_batch, step_id)
     loss.backward()
     opt.step()
     
-    if step_id % 50 == 0:
-        print(f"iter:{step_id}, loss: {loss.item()}, clip_loss: {log_dict["train/clip_loss"]}, bg_loss: {log_dict["train/bg_loss"]}, bce_loss: {log_dict["train/bce_loss"]}, dice_loss: {log_dict["train/dice_loss"]}")
+    if step_id % 50 == 0 and step_id != 0:
+        print(f"\n=== Iter: {step_id} ===")
+        print(f"[Train Loss] Total: {loss.item():.4f} | CLIP : {log_dict.get('train/clip_loss', 0):.4f} | Bg : {log_dict.get('train/bg_loss', 0):.4f} | bce_loss: {log_dict.get('train/bce_loss', 0):.4f} | dice_loss: {log_dict.get('train/dice_loss', 0):.4f}")
+        
         model.eval()
-        imgs, gts, texts, class_ids = model.get_input(batch)
+        with torch.no_grad():
+            try:
+                model.validation_step(val_batch, step_id)
+                metrics = model.val_metrics.compute()
+                print(f"[Val Metrics] DSC: {metrics['dsc']:.4f} | NSD: {metrics['nsd']:.4f} | F1: {metrics['f1']:.4f}")
+                model.val_metrics.reset()
+            except Exception as e:
+                print(f"!!! Validation Pipeline Failed: {e}")
+                import traceback
+                traceback.print_exc()
+        # training log_image
+        imgs, gts, texts, class_ids = model.get_input(train_batch)
         M = gts.shape[0] // imgs.shape[0]
         is_background = (class_ids == 0)
         fg_indices = torch.nonzero(~is_background).squeeze(1)

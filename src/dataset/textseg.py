@@ -149,7 +149,6 @@ class TextSegVal(Dataset):
         prompts = []
         class_ids = []
         if is_instance:
-            gts = (gts > 0).astype(np.uint8)
             prompts.append(random.choice((text_prompt[str(cls_id)])))
             class_ids = ["1"]
         else:
@@ -161,7 +160,7 @@ class TextSegVal(Dataset):
         class_ids =  "&".join(class_ids)
         return {
             "image": img_tensor.squeeze(1),
-            "mask": torch.from_numpy(gts).unsqueeze(1),
+            "mask": torch.from_numpy(gts).unsqueeze(1).to(torch.uint8),
             "text": text_prompt_sep,
             "class_ids": class_ids,
             "image_name": osp.basename(file_path).split('.npz')[0]

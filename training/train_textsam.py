@@ -4,40 +4,11 @@ import torch.nn.functional as F
 import lightning.pytorch as pl
 from src.models.heads import PromptEncoder, MaskDecoder
 from src.models.transformer import TwoWayTransformer
-import random
 from utils.helper import instantiate_from_config
 from itertools import chain
 from src.dataset.utils import unpad_and_resize
-from evaluation.SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient
+froms src.dataset.eval import SegEval
 
-def process_multi_prompts(text):
-    """
-    Process the input text to handle multiple prompts.
-    This function splits the text by [SEP] and returns a list of prompts.
-    """
-    if text is None:
-        return None, None
-    text = text if isinstance(text, (list, tuple)) else [text]
-    text = [_text.split("[SEP]")for _text in text]    
-    num_prompts = torch.tensor([len(_text) for _text in text], dtype=torch.int64)
-    text = [t for i in range(len(text)) for t in text[i]]
-    return text, num_prompts
-
-def parse_prompt_ids_dense(prompt_ids):
-    slice_strings = prompt_ids.split('&')
-    all_slices_labels = []
-    for content in slice_strings:
-        if not content:
-            all_slices_labels.append([])
-        else:
-            all_slices_labels.append([int(x) for x in content.split(':')])
-    return all_slices_labels
-
-def compute_multi_class_metrics(gt, seg):
-    metrics = {
-        ""
-    }
-    
 class TextSAM(pl.LightningModule):
     def __init__(
         self,
@@ -66,12 +37,16 @@ class TextSAM(pl.LightningModule):
 
         for p in self.parameters():
             p.requires_grad_(False)
+            
+        # new params (pooler, mask_former, logit_scale)
         for p in self.text_embedder.pooler.parameters():
             p.requires_grad_(True)
         for p in self.mask_former.parameters():
             p.requires_grad_(True)
         for p in self.loss_fn.parameters():
             p.requires_grad_(True)
+        
+        self.val_metrics = SegEval()
         
     def load_from_local(self, checkpoint_path, strict=False):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -101,14 +76,15 @@ class TextSAM(pl.LightningModule):
     
     def get_val_input(self, batch):
         images = batch['image']
-        masks = batch['masks'].to(torch.long)
+        masks = batch['mask'].to(torch.long)
         if images.shape[1] != 3:
             images = images.expand(-1, 3, -1, -1)
         if masks.shape[1] != 1:
             masks = masks.unsqueeze(1)
         text = list(chain.from_iterable(x.split("[SEP]") for x in batch['text']))
-        cls_ids = batch['class_ids'].split("&")
-        return images, masks, text, cls_ids
+        is_instance = batch['is_instance']
+        cls_ids = list(int(x) for x in batch['class_ids'].split("&"))
+        return images, masks, text, cls_ids, is_instance
     
     def decode(self, image_embeddings, text_embeddings):
         queries, keys, q_cls, k_cls = self.mask_former(image_embeddings, text_embeddings)
@@ -167,36 +143,43 @@ class TextSAM(pl.LightningModule):
         return total_loss, log_dict, low_res_masks
     
     def validation_step(self, batch, batch_idx):
-        images, target_masks, text_list, cls_ids = self.get_val_input(batch)
-        image_embeddings = self.image_encoder(images) # B*D, d, H, W
+        images, gt_mask, text_list, cls_ids, is_instance = self.get_val_input(batch)
+        image_embeddings = self.image_encoder(images) 
         text_embeddings = self.text_embedder(text_list) # BN, C
         if text_embeddings.ndim == 3:
             text_embeddings = text_embeddings[:, 0, :]
         text_embeddings = text_embeddings.unsqueeze(1)
         
         all_probs = []
-        for id in cls_ids:
-            text_embed = text_embeddings[id - 1]
-            k_pred_seg, _, _, _ = self.decode(image_embeddings, text_embed) # B,1,H,W
+        for idx, cls_id in enumerate(cls_ids):
+            text_embed = text_embeddings[idx]
+            k_pred_seg, _, _, _ = self.decode(image_embeddings, text_embed) # D,1,H,W
             k_pred_seg = unpad_and_resize(
                 k_pred_seg,
-                org_size= target_masks.shape[-2:],
+                org_size= gt_mask.shape[-2:],
                 curr_size= k_pred_seg.shape[-1]
             ) 
-            all_probs.append(torch.sigmoid(k_pred_seg).squeeze(1).cpu())
+            all_probs.append(torch.sigmoid(k_pred_seg).squeeze())
         
         all_probs = torch.stack(all_probs, dim=0) # K, D, H, W
-        pred_segs = torch.zeros_like(target_masks) 
-        max_indices = torch.argmax(all_probs, dim=0)
-        max_scores = torch.max(all_probs, dim=0)
-        foreground_mask = max_scores > 0.5
-        dsc = []
-        for k, id in enumerate(cls_ids):
-            mask_k = foreground_mask & (max_indices == k)
-            pred_segs[mask_k]=id
+        pred_segs = torch.zeros_like(gt_mask)
         
-        return total_loss
+        if is_instance:
+            pred_segs = (all_probs[0] > 0.5)
+        else:
+            max_scores, max_indices = torch.max(all_probs, dim=0)
+            fg_masks = max_scores > 0.5 
+            for k, cls_id in enumerate(cls_ids):
+                mask_k = fg_masks & (max_indices == k) # extraction for k-th seg
+                pred_segs[mask_k] = int(cls_id)
+            
+        pred_segs = pred_segs.long()
+        self.val_metrics.update(val_pred, val_gt, cls_ids)
 
+    def on_validation_epoch_end(self):
+        self.log_dict(metrics, prog_bar=True, logger=True, sync_dist=True)
+        self.val_metrics.reset()
+        
     def _build_sam_heads(self):
         self.prompt_embed_dim = self.hidden_dim
         self.sam_prompt_embed_dim = self.hidden_dim
@@ -221,24 +204,16 @@ class TextSAM(pl.LightningModule):
 
     def configure_optimizers(self):
         lr = 1e-5
-        new_params = list(self.mask_former.parameters()) + \
+        params = list(self.mask_former.parameters()) + \
                       list(self.text_embedder.pooler.parameters()) + \
-                      list(self.loss_fn.parameters())
-            
-        pretrained_params = list(self.prompt_encoder.parameters()) + \
-                            list(self.mask_decoder.parameters())
-
-        pretrained_params = [p for p in pretrained_params if p.requires_grad]
+                      list(self.loss_fn.parameters())+ \
         opt_lr = [
             {
-                "params": pretrained_params,
+                "params": params,
                 "lr": lr , 
             },
-            {
-                "params": new_params,
-                "lr": lr ,        
-            }
         ]
+        
         optimizer = torch.optim.AdamW(
             opt_lr, 
             betas=(0.9, 0.995),
