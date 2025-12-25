@@ -14,83 +14,74 @@ from copy import deepcopy
 from typing import Tuple, List, Any, Dict, Generator, ItemsView
 from itertools import product
 import math
+import cv2
 
-
-def get_axis(img):
-    shape = img.shape
-    diff_ratio = [2*abs(shape[1]-shape[2])/(shape[1]+shape[2]),
-            2*abs(shape[0]-shape[2])/(shape[0]+shape[2]),
-            2*abs(shape[0]-shape[1])/(shape[0]+shape[1])]
+def resize_longest_side_3d(image_3d, target_length=256, mode=cv2.INTER_CUBIC):
+    """
+    resize volume over slices
+    inputs: (D, H, W)
+    """
+    D, oldh, oldw = image_3d.shape
+    scale = target_length * 1.0 / max(oldh, oldw)
+    newh, neww = int(oldh * scale + 0.5), int(oldw * scale + 0.5)
     
-    if diff_ratio[0] < 0.5:
-        valid_axis = 0
-    else:
-        min_axis = np.argmin(shape)
-        valid_axis = min_axis
+    resized_volume = np.zeros((D, newh, neww), dtype=image_3d.dtype)
+    target_size = (neww, newh) 
+    
+    for i in range(D):
+        resized_volume[i] = cv2.resize(image_3d[i], target_size, interpolation=mode)
         
-    return valid_axis
+    return resized_volume
+
+def pad_image_3d(image_3d, target_size=256, pad_val=0):
+    """
+    Pad volumes on H, W to target_size (Center Padding)
+    inputs: (D, H, W)
+    """
+    D, h, w = image_3d.shape
+    padh = max(0, target_size - h)
+    padw = max(0, target_size - w)
+    if padh == 0 and padw == 0:
+        return image_3d
+    padh_top = padh // 2
+    padh_bottom = padh - padh_top
+    padw_left = padw // 2
+    padw_right = padw - padw_left
     
-def get_padding(vol):
-    shape = vol.shape[1:]
-    if shape[0] > shape[1]:
-        pad1 = (shape[0] - shape[1]) // 2
-        pad2 = (shape[0] - shape[1]) - pad1
-        pad_width = [[0, 0], [0, 0], [pad1, pad2]]
-    else:
-        pad1 = (shape[1] - shape[0]) // 2
-        pad2 = (shape[1] - shape[0]) - pad1
-        pad_width = [[0, 0], [pad1, pad2], [0, 0]]
-    padded_size = max(shape)
-    return pad_width, padded_size
-
-
-def remove_padding(vol, pad_width):
-    if pad_width is not None:
-        l1 = int(pad_width[1][0])
-        r1 = int(vol.shape[1] - pad_width[1][1])
-        l2 = int(pad_width[2][0])
-        r2 = int(vol.shape[2] - pad_width[2][1])
-        vol = vol[:, l1:r1, l2:r2]
-    return vol
-
-
-def pad_and_resize(vol, size, mode='nearest'):
-    pad_width, padded_size = get_padding(vol)
-    if pad_width is not None:
-        vol = np.pad(vol, pad_width, mode="constant", constant_values=0)
-    vol = torch.from_numpy(vol).unsqueeze(0).float()
+    padding = ((0, 0), (padh_top, padh_bottom), (padw_left, padw_right))
+    image_padded = np.pad(image_3d, padding, mode='constant', constant_values=pad_val)
     
-    resized_vol = F.interpolate(
-        vol, size=(size, size), mode=mode
-    )
-    if mode == 'nearest':
-        resized_vol = resized_vol.long().numpy().astype(np.uint8)
-    return resized_vol.squeeze(0), pad_width, padded_size
+    return image_padded
 
-
-def process_input(vol, size, mode):
+def unpad_and_resize(image_3d, org_size, curr_size=256):
+    org_h, org_w = org_size
+    scale = curr_size * 1.0 / max(org_h, org_w)
+    new_h = int(org_h * scale + 0.5)
+    new_w = int(org_w * scale + 0.5)
     
-    vol, pad_width, padded_size = pad_and_resize(vol, size, mode= mode)
+    pad_h, pad_w = curr_size - new_h, curr_size - new_w # get padded size
+    # padding of each side
+    pad_h_top = pad_h // 2
+    pad_w_left = pad_w // 2
     
-    return vol, pad_width, padded_size
+    if image_3d.ndim == 3:
+        image_3d = image_3d[:, pad_h_top : pad_h_top + new_h, 
+                                      pad_w_left : pad_w_left + new_w]
+        image_3d = image_3d.unsqueeze(1)
+    elif image_3d.ndim == 4:
+        image_3d = image_3d[..., pad_h_top : pad_h_top + new_h, 
+                                        pad_w_left : pad_w_left + new_w]
 
-
-def process_output(vol, pad_width, padded_size, valid_axis):
-    vol = torch.from_numpy(vol)
-    if vol.shape[-1] != padded_size or vol.shape[-2] != padded_size:
-        vol = F.interpolate(
-            vol.unsqueeze(0).float(), size=(padded_size, padded_size), mode="nearest"
+        
+        resized_volume = F.interpolate(
+            image_3d,
+            size=(org_h, org_w),
+            mode='nearest',
+            align_corners=False
         )
-        vol = vol.squeeze(0).int()
-            
-    vol = vol.cpu().numpy()
-    vol = remove_padding(vol, pad_width)
-    # vol = np.moveaxis(vol, 0, valid_axis)
+        
+    return resized_volume
     
-    return vol
-
-
-
 def nms_masks_batch_iou(masks: torch.Tensor,
                         scores: torch.Tensor,
                         iou_threshold: float = 0.5,
@@ -134,22 +125,6 @@ def nms_masks_batch_iou(masks: torch.Tensor,
         order = order[1:][remaining]
     
     return keep
-
-def get_axis(img):
-    # get the axis to slice the 3D volume
-    shape = img.shape
-    # get shape difference between the axes
-    diff_ratio = [2*abs(shape[1]-shape[2])/(shape[1]+shape[2]),
-            2*abs(shape[0]-shape[2])/(shape[0]+shape[2]),
-            2*abs(shape[0]-shape[1])/(shape[0]+shape[1])]
-    
-    if diff_ratio[0] < 0.5:
-        valid_axis = 0
-    else:
-        min_axis = np.argmin(shape)
-        valid_axis = min_axis
-        
-    return valid_axis
 
 def choose_prompt(prompts):
     if isinstance(prompts, str):

@@ -7,57 +7,112 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-
-from .utils import process_input, get_axis, choose_prompt, process_output
-
-def resize_input(image: torch.Tensor, current_spacing=(1.0, 1.0, 1.0), target_spacing=(1.0, 1.0, 1.0), target_shape = (256,256)):
-    
-    if image.dim() == 3: # (D, H, W)
-        x = image.unsqueeze(0).unsqueeze(0)
-    elif image.dim() == 4: # (C, D, H, W)
-        x = image.unsqueeze(0)
-    else:
-        x = image
-        
-    z_scale = current_spacing[0] / target_spacing[0]
-    new_depth = int(image.shape[-3] * z_scale)
-    
-    # 2. 获取目标 HW
-    new_h, new_w = target_shape
-    
-    # 3. 一次性 Trilinear 插值
-    final_size = (new_depth, new_h, new_w)
-    resized = F.interpolate(x, size=final_size, mode='trilinear', align_corners=False)
-    
-    return resized.squeeze()
-
-def resize_output(image: torch.Tensor,  target_shape = (256,256)):
-    
-    image = image.squeeze()
-    D, H, W = image.shape
-    image = image.view(D, 1, H, W) #
-    
-    resized_2d = F.interpolate(image, size=(target_shape[0], target_shape[1]), 
-                               mode='bilinear', align_corners=False)
-    
-    resized_2d = resized_2d.view(D, target_shape[0], target_shape[1])
-    
-    return resized_2d
+import cv2
+from .utils import pad_image_3d, resize_longest_side_3d
 
 
 class TextSeg(Dataset):
-    def __init__(self, data_dir, text_label_path, image_size=256, interpolate_mask_size=256, n_slicing=3):
+    def __init__(self, data_dir, text_label_path, image_size=256,  n_slicing=3, max_instances=5):
         """
         Args:
             data_dir (str): Path to the dataset directory (e.g., dataset/train_10/)
             text_label_path (str): Path to the text label JSON file.
             image_size (int): Target image size for resizing (default: 256).
-            mode (str): 'train' or 'val'. In train mode, tries to pick slices with labels.
         """
         self.data_dir = data_dir
         self.image_size = image_size
-        self.interpolate_mask_size = interpolate_mask_size
         self.n_slicing = n_slicing
+        with open(text_label_path, 'r') as f:
+            self.text_labels = json.load(f)
+        valid_keys = set(self.text_labels.keys())
+        self.samples = glob.glob(osp.join(data_dir, '**/*.npz'),recursive=True)
+        self.samples = sorted([
+            file_path 
+            for file_path in self.samples 
+            if osp.basename(osp.dirname(file_path)) in valid_keys
+        ])
+        self.max_instances = max_instances
+        
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        file_path = self.samples[idx]
+        dataset_name = osp.basename(osp.dirname(file_path))
+        try:
+            data = np.load(file_path)
+            imgs = data['imgs']
+            mask = data['gts']
+            text_prompt = self.text_labels[dataset_name]
+        except Exception as e:
+            print(f'error loading {file_path}: {e}')
+            return None
+        D, H, W = imgs.shape
+        if D < self.n_slicing:
+            num_pad = self.n_slicing - D
+            indices = np.concatenate([np.arange(D), np.full(num_pad, D - 1)]).astype(int)
+        else:
+            indices = np.random.choice(np.arange(D), size=self.n_slicing, replace=False)
+        images = imgs[indices].astype(np.uint8)
+        masks = mask[indices].astype(np.uint8)
+        
+        images = pad_image_3d(resize_longest_side_3d(images, target_length=self.image_size, mode=cv2.INTER_CUBIC)) 
+        masks = pad_image_3d(resize_longest_side_3d(masks, target_length=self.image_size, mode=cv2.INTER_NEAREST))
+        images, masks = random_transform(images, masks)
+        
+        valid_keys = [int(k) for k in text_prompt.keys() if k.isdigit()]
+        is_instance = text_prompt.get('instance_label') == 1
+        batch_masks = np.zeros((self.n_slicing, self.max_instances, self.image_size, self.image_size), dtype=np.uint8)
+        mask_ids = np.zeros((self.n_slicing * self.max_instances), dtype=np.uint8)
+        pter = 0
+        prompts = []
+        
+        for i in range(masks.shape[0]):
+            slice = masks[i]
+            unique_ids = [v for v in np.unique(slice) if v > 0]
+            slice_prompts = []
+            if len(unique_ids) > self.max_instances:
+                selected_ids = np.random.choice(unique_ids, size=self.max_instances, replace=False)
+            else:
+                selected_ids = unique_ids
+            np.random.shuffle(selected_ids)
+            for k, cls_id in enumerate(selected_ids): # cls_id in slice
+                batch_masks[i, k] = (slice == cls_id).astype(np.uint8)
+                text_key = str(cls_id) if not is_instance else str(valid_keys[0])
+                mask_ids[pter] = cls_id
+                pter += 1 
+                slice_prompts.append(random.choice(text_prompt[text_key]))
+            while len(slice_prompts) < self.max_instances:
+                slice_prompts.append("background")
+                mask_ids[pter] = 0
+                pter += 1
+            prompts.extend(slice_prompts)
+        
+        batch_masks = batch_masks.reshape((-1, self.image_size, self.image_size))
+        masks = np.stack(batch_masks, axis=0) if isinstance(batch_masks, list) else batch_masks
+        text_prompt_sep = "[SEP]".join(prompts)
+        
+        if isinstance(images, np.ndarray):
+            images = torch.from_numpy(images)
+        img_tensor = images.float() / 255.0
+        
+        return{
+            "image": img_tensor.unsqueeze(1), # n_slices, 1, h, w
+            "mask": torch.from_numpy(masks[:, np.newaxis, ...]).to(torch.uint8), # n*m, h, w
+            "mask_ids": mask_ids,
+            "text": text_prompt_sep,
+            "img_name": osp.basename(file_path).split('.npz')[0]
+        }
+
+class TextSegVal(Dataset):
+    def __init__(
+        self,
+        data_dir,
+        text_label_path,
+        image_size = 256,
+    ):
+        self.data_dir = data_dir
+        self.image_size = image_size
         with open(text_label_path, 'r') as f:
             self.text_labels = json.load(f)
         valid_keys = set(self.text_labels.keys())
@@ -70,69 +125,48 @@ class TextSeg(Dataset):
         
     def __len__(self):
         return len(self.samples)
-
+    
     def __getitem__(self, idx):
         file_path = self.samples[idx]
         dataset_name = osp.basename(osp.dirname(file_path))
+        
         try:
             data = np.load(file_path)
-            imgs = data['imgs'].astype(np.uint8)
-            mask = data['gts'].astype(np.uint8)
+            imgs = data['imgs'] # Shape: (D, H, W)
+            gts = data['gts']   # Shape: (D, H, W)
             text_prompt = self.text_labels[dataset_name]
         except Exception as e:
             print(f'error loading {file_path}: {e}')
             return None
-        D, H, W = imgs.shape
-        if D < self.n_slicing:
-            num_pad = self.n_slicing - D
-            indices = np.concatenate([np.arange(D), np.full(num_pad, D - 1)]).astype(int)
-        else:
-            indices = np.random.choice(np.arange(D), size=self.n_slicing)
-        images = imgs[indices]
-        mask = mask[indices]
-
-        image, pad_width, padded_size = process_input(images, self.image_size, mode='bicubic')
-        mask, _, _ = process_input(mask, self.image_size, mode='nearest')
-
-        valid_keys = [int(k) for k in text_prompt.keys() if k.isdigit()]
+        
+        images = pad_image_3d(resize_longest_side_3d(imgs, target_length=self.image_size, mode=cv2.INTER_CUBIC))
+        if isinstance(images, np.ndarray):
+            images = torch.from_numpy(images)
+        img_tensor = images.float() / 255.0 
+        
+        valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
         is_instance = text_prompt.get('instance_label') == 1
-        new_masks = []
         prompts = []
-        selected_ids = []
-        for i in range(mask.shape[0]):
-            slice = mask[i]
-            unique_ids = [v for v in np.unique(slice) if v > 0]
-            
-            if len(unique_ids) > 0:
-                slice_id = random.choice(unique_ids)
-                binary_mask = (slice == slice_id).astype(np.uint8)
-                if is_instance:
-                    prompt = random.choice(text_prompt[str(valid_keys[0])])
-                else:
-                    prompt = random.choice(text_prompt[str(slice)])
-                new_masks.append(binary_mask)
-                prompts.append(prompt)
-                selected_ids = slice_id
-            else:
-                new_masks.append(np.zeros_like(slice))
-                prompts.append("background") # 或者你的背景提示词
-                selected_ids.append(0)
-                    
-        mask = np.stack(new_masks) if isinstance(new_masks, list) else new_masks
-        class_ids = "&".join([str(cls) for cls in class_ids]) 
+        class_ids = []
+        if is_instance:
+            gts = (gts > 0).astype(np.uint8)
+            prompts.append(random.choice((text_prompt[str(cls_id)])))
+            class_ids = ["1"]
+        else:
+            for cls_id in valid_keys:
+                prompts.append(random.choice(text_prompt[str(cls_id)]))
+                class_ids.append(str(cls_id))
+                
         text_prompt_sep = "[SEP]".join(prompts)
-        if isinstance(image, np.ndarray):
-            image = torch.from_numpy(image)
-        img_tensor = image.float() / 255.0
-        return{
-            "image": img_tensor,
-            "mask": torch.from_numpy(mask[:,np.newaxis, ...]).to(torch.uint8),
-            "class_ids": class_ids,
+        class_ids =  "&".join(class_ids)
+        return {
+            "image": img_tensor.squeeze(1),
+            "mask": torch.from_numpy(gts).unsqueeze(1),
             "text": text_prompt_sep,
-            "ds": dataset_name,
-            "img_name": osp.basename(file_path).split('.npz')[0]
+            "class_ids": class_ids,
+            "image_name": osp.basename(file_path).split('.npz')[0]
         }
-
+        
 class DynamicPromptAugmentor:
     def __init__(self, concat_prob=0.3, drop_prob=0.1):
         self.concat_prob = concat_prob
@@ -163,9 +197,9 @@ class DynamicPromptAugmentor:
         return main_prompt
 
 class AugmentedTextSeg(TextSeg):
-    def __init__(self, data_dir, text_label_path, image_size=256, interpolate_mask_size=256, 
+    def __init__(self, data_dir, text_label_path, image_size=256, 
                  concat_prob=0.3, drop_prob=0.1):
-        super().__init__(data_dir, text_label_path, image_size, interpolate_mask_size)
+        super().__init__(data_dir, text_label_path, image_size)
         self.augmentor = DynamicPromptAugmentor(concat_prob=concat_prob, drop_prob=drop_prob)
 
     def __getitem__(self, idx):
@@ -196,41 +230,20 @@ class AugmentedTextSeg(TextSeg):
         
         return data
 
-class ValTextSeg(Dataset):
-    def __init__(self, img_dir, gt_dir, image_size=256):
-        self.img_dir = img_dir
-        self.gt_dir = gt_dir
-        self.image_size = image_size
-        self.img_samples = sorted(glob.glob(osp.join(img_dir, '*.npz'), recursive=False))
-        self.data_pairs=[]
-        for img_path in self.img_samples:
-            basename = osp.basename(img_path)
-            gt_path = osp.join(gt_dir, basename)
-            if osp.exists(gt_path):
-                self.data_pairs.append((img_path, gt_path))
-            else:
-                print(f"[Warning] GT not found for {basename}, skipping.")
-                
-    def __len__(self):
-        return len(self.data_pairs)
-    
-    def __getitem__(self, idx):
-        img_path, gt_path = self.data_pairs[idx]
-        file_name = osp.basename(img_path)
-        try:
-            val_img_data = np.load(img_path, allow_pickle=True)
 
-            imgs = val_img_data['imgs'].astype(np.uint8)          
-            
-            text_prompt_dict = val_img_data['text_prompts'].item() 
-            img_tensor = torch.from_numpy(imgs).float()
-            img_tensor = img_tensor - img_tensor.min()
-            
-            return{
-                "image": img_tensor,
-                "prompt_dict": text_prompt_dict,
-                "img_name": file_name,
-            }
-        except Exception as e:
-            print(f'Error loading {file_name}: {e}')
-            return self.__getitem__((idx+1)%len(self))
+def random_transform(images, masks):
+    B, H, W = images.shape
+    if torch.rand(1).item() > 0.5:
+        images = np.flip(images, axis=2)
+        masks = np.flip(masks, axis=2)
+        
+    if torch.rand(1).item() > 0.5:
+        images = np.flip(images, axis=1)
+        masks = np.flip(masks, axis=1)
+        
+    k = random.choice([0, 1, 2, 3]) # 0, 90, 180, 270 degrees
+    if k > 0:
+        images = np.rot90(images, k=k, axes=(1, 2))
+        masks = np.rot90(masks, k=k, axes=(1, 2))
+    
+    return np.ascontiguousarray(images), np.ascontiguousarray(masks)

@@ -19,14 +19,15 @@ class TextEmbedder(nn.Module):
         if local_pt is not None:
             state_dict = torch.load(local_pt)
             new_state_dict = {k.replace('transformer.',''):v for k,v in state_dict.items()}
-            self.hf_module.load_state_dict(new_state_dict, strict=False)
-        hidden_dim = (d_model + output_dim) //2 
+            load_result = self.hf_module.load_state_dict(new_state_dict, strict=False)
+        hidden_dim = (d_model + output_dim) // 2
+        self.hf_module.pooler= nn.Identity()
         self.pooler = nn.Sequential(
             nn.Linear(d_model, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, output_dim)
         )
-        
+
     def forward(self, text: list[str]) -> torch.Tensor:
         batch_encoding = self.tokenizer(
             text,

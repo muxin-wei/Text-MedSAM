@@ -2,10 +2,10 @@ model:
   target: training.train_textsam.TextSAM
   base_learning_rate: 4.5e-5
   params:
-    image_encoder_configs:
+    image_encoder:
       target: src.models.visual.image_encoder.repvit_m1_0
     text_embedder_configs:
-      target: src.models.heads.textembedder # Placeholder, assuming similar architecture
+      target: src.models.heads.text_embedder.TextEmbedder # Placeholder, assuming similar architecture
       params:
         version: ckpts/bert
         max_length: 256
@@ -22,9 +22,10 @@ model:
         depth: 4
         num_heads: 8
     loss_configs:
-      target: src.losses.total_loss.TotalLoss
+      target: src.losses.total_loss.TextSegLoss
       params:
         clip_loss_weight: 1.0
+        bg_loss_weight: 1.0
         seg_loss_configs:
           target: src.losses.medsam_loss.MedSamLoss
           params:
@@ -34,7 +35,9 @@ model:
           params:
             temperature: 0.07
     image_size: 256
-    
+    hidden_dim: 256
+    checkpoint: /root/autodl-tmp/Rep-MedSAM/ckpts/rep_medsam.pth
+
 data:
   target: main.DataModuleFromConfig
   params:

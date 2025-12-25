@@ -2,25 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning.pytorch as pl
-from typing import Optional, Type, Tuple
-from src.models.heads import PromptEncoder, MaskDecoder, TwoWayTransformer
+from src.models.heads import PromptEncoder, MaskDecoder
+from src.models.transformer import TwoWayTransformer
 import random
 from utils.helper import instantiate_from_config
-
-
-def random_transform(images, masks):
-    B, C, H, W = images.shape
-    if torch.rand(1).item() > 0.5:
-        images = torch.flip(images, dims=[3])
-        masks = torch.flip(masks, dims=[3])
-    if torch.rand(1).item() > 0.5:
-        images = torch.flip(images, dims=[2])
-        masks = torch.flip(masks, dims=[2])
-    k = random.choice([0, 1, 2, 3]) # 0, 90, 180, 270 degrees
-    if k > 0:
-        images = torch.rot90(images, k=k, dims=[2, 3])
-        masks = torch.rot90(masks, k=k, dims=[2, 3])
-    return images, masks
+from itertools import chain
+from src.dataset.utils import unpad_and_resize
+from evaluation.SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient
 
 def process_multi_prompts(text):
     """
@@ -45,6 +33,11 @@ def parse_prompt_ids_dense(prompt_ids):
             all_slices_labels.append([int(x) for x in content.split(':')])
     return all_slices_labels
 
+def compute_multi_class_metrics(gt, seg):
+    metrics = {
+        ""
+    }
+    
 class TextSAM(pl.LightningModule):
     def __init__(
         self,
@@ -54,17 +47,22 @@ class TextSAM(pl.LightningModule):
         loss_configs,
         ds_scale = 4.,
         image_size=256,
+        hidden_dim=256,
         checkpoint=None,
     ):
         super().__init__()        
-        self.image_encoder = image_encoder
+        self.image_encoder = instantiate_from_config(image_encoder)
         self.text_embedder = instantiate_from_config(text_embedder_configs)
         self.mask_former = instantiate_from_config(maskformer_config)
         self.loss_fn = instantiate_from_config(loss_configs)
         self.image_size = image_size
         self.image_embedding_size = int(image_size // ds_scale)
+        self.hidden_dim = hidden_dim
+        self.image_size = image_size
         self._build_sam_heads()
-        self.load_from_local(checkpoint, strict=False)
+        if checkpoint is not None:
+            load_res = self.load_from_local(checkpoint, strict=False)
+            print(load_res)
 
         for p in self.parameters():
             p.requires_grad_(False)
@@ -92,73 +90,111 @@ class TextSAM(pl.LightningModule):
     def get_input(self, batch):
         images = batch['image']
         masks = batch['mask'].to(torch.long)
-        if len(images.shape) > 4:
-            B, C, H, W = images.shape
-            images = images.reshape(-1, C, H, W)
-        else:
-            B, N, H, W = images.shape
-            images = images.reshape(-1, H, W).unsqueeze(1).expand(-1, 3, -1, -1)
-        if len(masks.shape) > 4:
-            B, N, C, H, W = masks.shape
-            masks = masks.reshape(-1, C, H, W)
-        images, masks = random_transform(images, masks)
-        text = batch['text']
-        flat_text = [x for t in text for x in t.split('[SEP]')]
-        return images, masks, flat_text
-
-    def forward(self, image, text):
-        # if any("[SEP]" in t for t in text):
-        #     text, num_text = process_multi_prompts(text)
-        image_embedding = self.image_encoder(image) # b c h w 
-        text_embedding = self.text_embedder(text) # b c
-        if len(text_embedding.shape) > 2:
-            text_embedding = text_embedding[:, -1]
-        text_embedding = text_embedding.unsqueeze(1)
-        text_embedding = F.normalize(text_embedding, dim=-1, p=2)
-        image_embedding = F.normalize(image_embedding, dim=-1, p=2)
-        queries, keys, q_cls, k_cls,  = self.mask_former(image_embedding, text_embedding)
-        dense_mask_input = queries
-        sparse_embeddings, dense_embeddings = self.prompt_encoder( 
+        B, N, C, H, W = images.shape
+        images = images.reshape(-1, C, H, W).expand(-1, 3, -1, -1)
+        B, N, C, H, W = masks.shape
+        masks = masks.reshape(-1, C, H, W)
+        text = list(chain.from_iterable(x.split("[SEP]") for x in batch['text']))
+        class_ids = batch['mask_ids']
+        class_ids = class_ids.reshape(-1)
+        return images, masks, text, class_ids
+    
+    def get_val_input(self, batch):
+        images = batch['image']
+        masks = batch['masks'].to(torch.long)
+        if images.shape[1] != 3:
+            images = images.expand(-1, 3, -1, -1)
+        if masks.shape[1] != 1:
+            masks = masks.unsqueeze(1)
+        text = list(chain.from_iterable(x.split("[SEP]") for x in batch['text']))
+        cls_ids = batch['class_ids'].split("&")
+        return images, masks, text, cls_ids
+    
+    def decode(self, image_embeddings, text_embeddings):
+        queries, keys, q_cls, k_cls = self.mask_former(image_embeddings, text_embeddings)
+        
+        sparse_embeddings, dense_embeddings = self.prompt_encoder(
             points=None,
             boxes=None,
             masks=None,
             text=q_cls,
         )
-        dense_embeddings = dense_mask_input 
-        image_pe = self.prompt_encoder.get_dense_pe() 
         low_res_masks, iou_predictions = self.mask_decoder(
-            image_embeddings=image_embedding,
-            image_pe=image_pe, 
+            image_embeddings=image_embeddings,
+            image_pe=self.prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
+            dense_prompt_embeddings=queries, 
             multimask_output=False,
         )
         return low_res_masks, iou_predictions, k_cls, q_cls
     
+    def forward(self, image, text):
+        image_embeddings = self.image_encoder(image) # b c h w 
+        text_embeddings = self.text_embedder(text) # b c
+        if text_embeddings.ndim == 3:
+            text_embedding = text_embeddings[:, 0, :]
+        text_embedding = text_embedding.unsqueeze(1) # b 1 c
+        
+        return self.decode(image_embeddings=image_embeddings, text_embeddings=text_embeddings)
+    
+    
     def training_step(self, batch, batch_idx):
-        images, target_masks, text_list = self.get_input(batch)
-        pred_masks, iou_pred, k_cls, q_cls = self(images, text_list)
+        images, target_masks, text_list, class_ids = self.get_input(batch)
+        image_embeddings = self.image_encoder(images) # B*N, d, H, W
+        text_embeddings = self.text_embedder(text_list) # B*N*M
+        if text_embeddings.ndim == 3:
+            text_embeddings = text_embeddings[:, 0, :]
+        text_embeddings = text_embeddings.unsqueeze(1) # b 1 c
         
-        img_feat = k_cls.squeeze(1)
-        text_feat = q_cls.squeeze(1)
+        # expand image embeddings
+        M = text_embeddings.shape[0] // image_embeddings.shape[0]
+        image_embeddings = image_embeddings.unsqueeze(1).expand(-1, M, -1, -1, -1)
+        image_embeddings = image_embeddings.reshape(-1, *image_embeddings.shape[2:])
+
+        # decode segs
+        low_res_masks, iou_predictions, k_cls, q_cls = self.decode(image_embeddings, text_embeddings)
         
-        total_loss, log_dict = self.loss_fn(pred_masks, target_masks, img_feat, text_feat, batch_idx, split='train')
+        # loss_inputs
+        is_background = (class_ids == 0)
+        bg_indices = torch.nonzero(is_background).squeeze(1)
+        fg_indices = torch.nonzero(~is_background).squeeze(1)
+        img_feat = k_cls.squeeze(1)[fg_indices]
+        text_feat = q_cls.squeeze(1)[fg_indices]
+        bg_feat = k_cls.squeeze(1)[bg_indices] if len(bg_indices) > 0 else None
+        total_loss, log_dict = self.loss_fn(low_res_masks, target_masks, img_feat, text_feat, bg_feat, batch_idx, split='train')
+        self.log_dict(log_dict, prog_bar=True, logger=True)
         
-        self.log_dict(log_dict, prog_bar=False, logger=True)
-        return total_loss
+        return total_loss, log_dict, low_res_masks
     
     def validation_step(self, batch, batch_idx):
-        images, target_masks, text_list = self.get_val_input(batch)
-        pred_masks, _,  q_cls, k_cls = self(images, text_list)
-        if pred_masks.shape[-2:] != target_masks.shape[-2:]:
-            target_masks = F.interpolate(target_masks.float(), size=pred_masks.shape[-2:], mode='nearest').long()
+        images, target_masks, text_list, cls_ids = self.get_val_input(batch)
+        image_embeddings = self.image_encoder(images) # B*D, d, H, W
+        text_embeddings = self.text_embedder(text_list) # BN, C
+        if text_embeddings.ndim == 3:
+            text_embeddings = text_embeddings[:, 0, :]
+        text_embeddings = text_embeddings.unsqueeze(1)
         
-        img_feat = k_cls.squeeze(1)
-        text_feat = q_cls.squeeze(1)
-
-        total_loss, log_dict = self.loss_fn(pred_masks, target_masks, img_feat, text_feat, batch_idx, split='val')
-
-        self.log_dict(log_dict, prog_bar=False, logger=True)
+        all_probs = []
+        for id in cls_ids:
+            text_embed = text_embeddings[id - 1]
+            k_pred_seg, _, _, _ = self.decode(image_embeddings, text_embed) # B,1,H,W
+            k_pred_seg = unpad_and_resize(
+                k_pred_seg,
+                org_size= target_masks.shape[-2:],
+                curr_size= k_pred_seg.shape[-1]
+            ) 
+            all_probs.append(torch.sigmoid(k_pred_seg).squeeze(1).cpu())
+        
+        all_probs = torch.stack(all_probs, dim=0) # K, D, H, W
+        pred_segs = torch.zeros_like(target_masks) 
+        max_indices = torch.argmax(all_probs, dim=0)
+        max_scores = torch.max(all_probs, dim=0)
+        foreground_mask = max_scores > 0.5
+        dsc = []
+        for k, id in enumerate(cls_ids):
+            mask_k = foreground_mask & (max_indices == k)
+            pred_segs[mask_k]=id
+        
         return total_loss
 
     def _build_sam_heads(self):
@@ -184,13 +220,12 @@ class TextSAM(pl.LightningModule):
         )
 
     def configure_optimizers(self):
-        lr = self.learning_rate
+        lr = 1e-5
         new_params = list(self.mask_former.parameters()) + \
                       list(self.text_embedder.pooler.parameters()) + \
                       list(self.loss_fn.parameters())
             
-        pretrained_params = list(self.image_encoder.parameters()) + \
-                            list(self.prompt_encoder.parameters()) + \
+        pretrained_params = list(self.prompt_encoder.parameters()) + \
                             list(self.mask_decoder.parameters())
 
         pretrained_params = [p for p in pretrained_params if p.requires_grad]
@@ -201,7 +236,7 @@ class TextSAM(pl.LightningModule):
             },
             {
                 "params": new_params,
-                "lr": lr * 0.1,        
+                "lr": lr ,        
             }
         ]
         optimizer = torch.optim.AdamW(
@@ -209,24 +244,9 @@ class TextSAM(pl.LightningModule):
             betas=(0.9, 0.995),
             weight_decay=0.05,
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1)
         return [optimizer], [scheduler]
 
-    @torch.no_grad()
-    def postprocess_masks(self, masks, new_size, original_size):
-        """
-        Do cropping and resizing
-        """
-        # Crop
-        masks = masks[:, :, :new_size[0], :new_size[1]]
-        # Resize
-        masks =  F.interpolate(
-            masks,
-            size=(original_size[0], original_size[1]),
-            mode="bilinear",
-            align_corners=False,
-        )
-        return masks
 
     @torch.no_grad()
     def log_images(self, batch, split="train", pl_module=None):

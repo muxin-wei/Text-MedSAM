@@ -9,6 +9,7 @@
 *.log
 *.png
 *.tar.gz
+*.zip
 data/
 imgs/
 wandb/
@@ -21,6 +22,8 @@ dockers/
 inputs/
 weights/
 teacher_model/
+logs/
+test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -187,8 +190,3 @@ cython_debug/
 
 .python-version
 ckpts
-*.zip
-*.tar.gz
-*.npy
-*.npz
-*.png

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from typing import Type
+from typing import Type, Tuple
 
 class MLPBlock(nn.Module): # mlp in Transformer
     def __init__(

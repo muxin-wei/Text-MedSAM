@@ -198,11 +198,11 @@ def validate_one_epoch(fabric, model, val_loader, epoch, global_step):
 def main():
     torch.set_float32_matmul_precision('medium')
     parser = argparse.ArgumentParser()
-    parser.add_argument("-b", "--base", nargs="*", default=["configs/your_config.yaml"])
-    parser.add_argument("-s", "--seed", type=int, default=42)
+    parser.add_argument("-b", "--base", nargs="*", default="configs/text_seg_repvit.yaml")
+    parser.add_argument("-s", "--seed", type=int, default=1234)
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--devices", type=str, default="auto")
-    parser.add_argument("-n", "--name", type=str, default="", help="Experiment name suffix")
+    parser.add_argument("-n", "--name", type=str, default="", help="10percent_5_fold")
     args = parser.parse_args()
     
     logger = None

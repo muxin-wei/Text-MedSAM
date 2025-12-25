@@ -19,49 +19,26 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 try:
-    from training.train_text_seg import TextSAM
+    from training.train_textsam import TextSAM
     from utils.utils import replace_batchnorm
-    from src.repvit import repvit_m1_0
+    from src.models.visual.image_encoder import repvit_m1_0
 except ImportError as e:
     print(f"Error importing model/dataset classes: {e}")
     print("Please ensure textsam/train_text_seg.py and textsam/textseg.py are accessible.")
     sys.exit(1)
 
-def resize_longest_side_3d(image_3d, target_length=256):
-    """
-    对 3D 卷的每一层切片进行 resize_longest_side 操作。
-    输入格式: (D, H, W)
-    """
-    D, oldh, oldw = image_3d.shape
-    scale = target_length * 1.0 / max(oldh, oldw)
-    newh, neww = int(oldh * scale + 0.5), int(oldw * scale + 0.5)
-    
-    # 预分配内存，比 append 更快
-    # 注意：cv2.resize 输出是 (W, H)，所以内存分配要是 (D, newh, neww)
-    resized_volume = np.zeros((D, newh, neww), dtype=image_3d.dtype)
-    
-    target_size = (neww, newh) # cv2 接受 (width, height)
-    
-    for i in range(D):
-        # 逐层处理
-        resized_volume[i] = cv2.resize(image_3d[i], target_size, interpolation=cv2.INTER_AREA)
-        
-    return resized_volume
 
 def pad_image_3d(image_3d, target_size=256, pad_val=0):
     """
-    对 3D 卷的 H 和 W 维度进行 padding。
-    输入格式: (D, H, W)
+    padding volumes on H, W。
+    inputs: (D, H, W)
     """
     D, h, w = image_3d.shape
     padh = target_size - h
     padw = target_size - w
     
-    # np.pad 支持多维: ((D_before, D_after), (H_before, H_after), (W_before, W_after))
-    # 我们只在 H 和 W 的后面 (右下) 进行 padding
     padding = ((0, 0), (0, padh), (0, padw))
     
-    # constant_values 指定填充值 (背景通常是 0)
     image_padded = np.pad(image_3d, padding, mode='constant', constant_values=pad_val)
     
     return image_padded

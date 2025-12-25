@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Type
 
 from src.models.modules import LayerNorm2d, MLPBlock, Conv2d_BN, RepViTBlock, _make_divisible
-from repvit_cfgs import repvit_m1_0_cfgs, repvit_m1_5_cfgs, repvit_m0_9_cfgs, repvit_L_cfgs
+from .repvit_cfgs import repvit_m1_0_cfgs, repvit_m1_5_cfgs, repvit_m0_9_cfgs
 
 # This class and its supporting functions below lightly adapted from the ViTDet backbone available at: https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/backbone/vit.py # noqa
 class ImageEncoderViT(nn.Module):

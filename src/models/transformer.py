@@ -7,13 +7,9 @@
 
 import torch
 from torch import Tensor, nn
-from torch.nn.init import trunc_normal_
-import torch.nn.functional as F
 import math
 from typing import Tuple, Type
-from functools import partial
-from src.models.modules import MLPBlock
-from models import PatchEmbed
+from src.models.modules import MLPBlock, PatchEmbed
 from timm.models.layers import DropPath, to_2tuple
 
 class TwoWayTransformer(nn.Module):
