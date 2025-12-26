@@ -7,7 +7,8 @@ from src.models.transformer import TwoWayTransformer
 from utils.helper import instantiate_from_config
 from itertools import chain
 from src.dataset.utils import unpad_and_resize
-froms src.dataset.eval import SegEval
+from src.dataset.eval import SegEval
+from time import time
 
 class TextSAM(pl.LightningModule):
     def __init__(
@@ -75,16 +76,25 @@ class TextSAM(pl.LightningModule):
         return images, masks, text, class_ids
     
     def get_val_input(self, batch):
-        images = batch['image']
-        masks = batch['mask'].to(torch.long)
+        images = batch['image'].squeeze()
+        masks = batch['mask'].squeeze()
         if images.shape[1] != 3:
-            images = images.expand(-1, 3, -1, -1)
-        if masks.shape[1] != 1:
-            masks = masks.unsqueeze(1)
+            images = images.unsqueeze(1).expand(-1, 3, -1, -1)
+
         text = list(chain.from_iterable(x.split("[SEP]") for x in batch['text']))
-        is_instance = batch['is_instance']
-        cls_ids = list(int(x) for x in batch['class_ids'].split("&"))
+        is_instance = batch['is_instance'][0] if isinstance(batch['is_instance'], list) else batch['is_instance']
+        cls_ids = list(int(x) for x in batch['class_ids'][0].split("&"))
         return images, masks, text, cls_ids, is_instance
+    
+    @torch.no_grad()
+    def encode_image(self, images):
+        image_embeddings = self.image_encoder(images)
+        return image_embeddings
+    
+    # def encode_text(self, texts):
+    #     with torch.no_grad():
+    #         text_embeddings = self.text_embedder.hf_module(texts)
+    #     return self.text_embedder.pooler(text_embeddings)
     
     def decode(self, image_embeddings, text_embeddings):
         queries, keys, q_cls, k_cls = self.mask_former(image_embeddings, text_embeddings)
@@ -113,10 +123,9 @@ class TextSAM(pl.LightningModule):
         
         return self.decode(image_embeddings=image_embeddings, text_embeddings=text_embeddings)
     
-    
     def training_step(self, batch, batch_idx):
         images, target_masks, text_list, class_ids = self.get_input(batch)
-        image_embeddings = self.image_encoder(images) # B*N, d, H, W
+        image_embeddings = self.encode_image(images) # B*N, d, H, W
         text_embeddings = self.text_embedder(text_list) # B*N*M
         if text_embeddings.ndim == 3:
             text_embeddings = text_embeddings[:, 0, :]
@@ -143,7 +152,8 @@ class TextSAM(pl.LightningModule):
         return total_loss, log_dict, low_res_masks
     
     def validation_step(self, batch, batch_idx):
-        images, gt_mask, text_list, cls_ids, is_instance = self.get_val_input(batch)
+        images, gt_mask, text_list, class_ids, is_instance = self.get_val_input(batch)
+        t0 = time()
         image_embeddings = self.image_encoder(images) 
         text_embeddings = self.text_embedder(text_list) # BN, C
         if text_embeddings.ndim == 3:
@@ -151,32 +161,35 @@ class TextSAM(pl.LightningModule):
         text_embeddings = text_embeddings.unsqueeze(1)
         
         all_probs = []
-        for idx, cls_id in enumerate(cls_ids):
-            text_embed = text_embeddings[idx]
+        for idx, cls_id in enumerate(class_ids):
+            text_embed = text_embeddings[idx].unsqueeze(1)
             k_pred_seg, _, _, _ = self.decode(image_embeddings, text_embed) # D,1,H,W
             k_pred_seg = unpad_and_resize(
                 k_pred_seg,
                 org_size= gt_mask.shape[-2:],
                 curr_size= k_pred_seg.shape[-1]
             ) 
-            all_probs.append(torch.sigmoid(k_pred_seg).squeeze())
-        
-        all_probs = torch.stack(all_probs, dim=0) # K, D, H, W
-        pred_segs = torch.zeros_like(gt_mask)
-        
+            all_probs.append(torch.sigmoid(k_pred_seg).squeeze(1))
+        all_probs = torch.stack(all_probs, dim=0)
+        t1 = time()
+        D, H, W = all_probs.shape[1:]
+        pred_segs = torch.zeros((D, H, W), dtype=torch.uint8, device=all_probs.device) # D,H,W
         if is_instance:
             pred_segs = (all_probs[0] > 0.5)
         else:
             max_scores, max_indices = torch.max(all_probs, dim=0)
             fg_masks = max_scores > 0.5 
-            for k, cls_id in enumerate(cls_ids):
+            for k, cls_id in enumerate(class_ids):
                 mask_k = fg_masks & (max_indices == k) # extraction for k-th seg
                 pred_segs[mask_k] = int(cls_id)
-            
         pred_segs = pred_segs.long()
-        self.val_metrics.update(val_pred, val_gt, cls_ids)
-
+        t2 = time()
+        if gt_mask.ndim == 5: gt_mask = gt_mask.squeeze()
+        self.val_metrics.update(pred_segs, gt_mask, class_ids)
+        print(f"\r[Val Step {batch_idx}] Infer: {t1-t0:.2f}s | Metric: {t2-t1:.2f}s", end="")        
+        
     def on_validation_epoch_end(self):
+        metrics = self.val_metrics.compute()
         self.log_dict(metrics, prog_bar=True, logger=True, sync_dist=True)
         self.val_metrics.reset()
         
@@ -206,7 +219,7 @@ class TextSAM(pl.LightningModule):
         lr = 1e-5
         params = list(self.mask_former.parameters()) + \
                       list(self.text_embedder.pooler.parameters()) + \
-                      list(self.loss_fn.parameters())+ \
+                      list(self.loss_fn.parameters())
         opt_lr = [
             {
                 "params": params,

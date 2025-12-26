@@ -23,12 +23,12 @@ class SegEval(Metric):
         self.add_state("FP", default=torch.tensor(0.), dist_reduce_fx="sum")
         self.add_state("FN", default=torch.tensor(0.), dist_reduce_fx="sum")
         self.add_state("DSC_TP", default=torch.tensor(0.), dist_reduce_fx="sum")
-        self.add_state("num_instance", default=torch.tensor(0).to(torch.uint32), dist_reduce_fx="sum")
+        self.add_state("num_instance", default=torch.tensor(0).long(), dist_reduce_fx="sum")
         
         # semantic seg
         self.add_state("DSC", default=torch.tensor(0.), dist_reduce_fx="sum")
-        self.add_state("NSD", default=torch.tensor(0.), dist_reduce_fx="sum")
-        self.add_state("num_semantics", default=torch.tensor(0).to(torch.uint32), dist_reduce_fx="sum")
+        # self.add_state("NSD", default=torch.tensor(0.), dist_reduce_fx="sum")
+        self.add_state("num_semantics", default=torch.tensor(0).long(), dist_reduce_fx="sum")
         
     def update(self, pred_mask, gt_mask, cls_ids):
         if isinstance(pred_mask, torch.Tensor):
@@ -37,7 +37,7 @@ class SegEval(Metric):
             self._process_sample(pred_mask=pred_mask, gt_mask=gt_mask, cls_ids=cls_ids)
     
     def compute(self):
-        nsd = self.NSD / self.num_semantics if self.num_semantics > 0 else 0.0
+        # nsd = self.NSD / self.num_semantics if self.num_semantics > 0 else 0.0
         dsc = self.DSC / self.num_semantics if self.num_semantics > 0 else 0.0
         
         dsc_tp = self.DSC_TP / self.num_instance if self.num_instance > 0 else 0.0
@@ -47,7 +47,7 @@ class SegEval(Metric):
         fn = self.FN / self.num_instance if self.num_instance > 0 else 0.0
         
         return {
-            "nsd": nsd,
+            # "nsd": nsd,
             "dsc": dsc,
             "dsc_tp": dsc_tp,
             "f1": f1,
@@ -63,7 +63,7 @@ class SegEval(Metric):
             pred_mask = segmentation.relabel_sequential(pred_mask)[0]
             gt_mask = segmentation.relabel_sequential(gt_mask)[0]
             # F1 COMPUTATION
-            tp, fp, fn, matched_pairs = self._eval_tp_fp_fn(gt_mask, pred_mask, self.iou_threshold
+            tp, fp, fn, matched_pairs = self._eval_tp_fp_fn(gt_mask, pred_mask, self.iou_threshold)
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
@@ -84,9 +84,9 @@ class SegEval(Metric):
             if not present_labels:
                 return
             mean_dsc = self._compute_multi_class_dsc(gt=gt_mask, seg=pred_mask, label_ids=present_labels)
-            mean_nsd = self._compute_multi_class_nsd(gt=gt_mask, seg=pred_mask, label_ids=present_labels, tolerance=self.nsd_tolerance)
+            # mean_nsd = self._compute_multi_class_nsd(gt=gt_mask, seg=pred_mask, label_ids=present_labels, tolerance=self.nsd_tolerance)
             self.DSC += float(mean_dsc)
-            self.NSD += float(mean_nsd)
+            # self.NSD += float(mean_nsd)
             self.num_semantics +=1
                 
     #############################################################
@@ -113,14 +113,13 @@ class SegEval(Metric):
         return tp, fp, fn, matched_pairs
     
     def _compute_matched_dice(self, gt, seg, matched_pairs):
-        dsc_list = []
+        dsc_list = [0.]
         for gt_idx, pred_idx in matched_pairs:
             gt_mask_i = (gt == (gt_idx + 1))
             pred_mask_i = (seg == (pred_idx + 1))
             dsc_value = compute_dice_coefficient(gt_mask_i, pred_mask_i)
             dsc_list.append(dsc_value)
-        dsc_tp = np.mean(dsc_list)
-        return np.mean(dsc_list)
+        return np.nanmean(dsc_list)
     
     
     def _compute_multi_class_dsc(self, gt, seg, label_ids):
@@ -133,22 +132,22 @@ class SegEval(Metric):
             return 0.
         return np.nanmean(dsc)
     
-    def _compute_multi_class_nsd(self, gt, seg, label_ids, spacing=(1.0, 1.0, 1.0), tolerance=2.0):
-        if not label_ids:
-            return np.nan
-        nsd = []
-        for i in label_ids:
-            gt_i = gt == i
-            seg_i = seg == i
-            if np.sum(gt_i) == 0 and np.sum(seg_i) == 0:
-                nsd.append(1.0)
-                continue
-            if np.sum(gt_i) == 0 or np.sum(seg_i) == 0:
-                nsd.append(0.0)
-                continue
-            surface_distance = compute_surface_distances(gt_i, seg_i, spacing_mm=spacing)
-            nsd.append(compute_surface_dice_at_tolerance(surface_distance, tolerance))
-        return np.nanmean(nsd)
+    # def _compute_multi_class_nsd(self, gt, seg, label_ids, spacing=(1.0, 1.0, 1.0), tolerance=2.0):
+    #     if not label_ids:
+    #         return np.nan
+    #     nsd = []
+    #     for i in label_ids:
+    #         gt_i = gt == i
+    #         seg_i = seg == i
+    #         if np.sum(gt_i) == 0 and np.sum(seg_i) == 0:
+    #             nsd.append(1.0)
+    #             continue
+    #         if np.sum(gt_i) == 0 or np.sum(seg_i) == 0:
+    #             nsd.append(0.0)
+    #             continue
+    #         surface_distance = compute_surface_distances(gt_i, seg_i, spacing_mm=spacing)
+    #         nsd.append(compute_surface_dice_at_tolerance(surface_distance, tolerance))
+    #     return np.nanmean(nsd)
     
     def _label_overlap(self, x, y):
         x = x.ravel()

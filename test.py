@@ -22,16 +22,17 @@ model = instantiate_from_config(config.model).to("cuda")
 
 
 ds = TextSeg(
-    data_dir='/root/autodl-tmp/dataset/train_sample',
-    text_label_path = '/root/autodl-tmp/dataset/seg_class.json',
+    data_dir='/root/autodl-tmp/dataset/test',
+    text_label_path = '/root/autodl-tmp/dataset/text_seg_class.json',
     n_slicing=8,
+    max_instances=9,
     image_size=256,
 )
 dl = DataLoader(ds, batch_size=1, shuffle=False, num_workers=8, )
 
 val_ds = TextSegVal(
-    data_dir='/root/autodl-tmp/dataset/train_sample',
-    text_label_path = '/root/autodl-tmp/dataset/seg_class.json',
+    data_dir='/root/autodl-tmp/dataset/test',
+    text_label_path = '/root/autodl-tmp/dataset/text_seg_class.json',
     image_size=256,
 )
 val_dl = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=8,)
@@ -58,7 +59,7 @@ while True:
     loss.backward()
     opt.step()
     
-    if step_id % 50 == 0 and step_id != 0:
+    if step_id % 50 == 0:
         print(f"\n=== Iter: {step_id} ===")
         print(f"[Train Loss] Total: {loss.item():.4f} | CLIP : {log_dict.get('train/clip_loss', 0):.4f} | Bg : {log_dict.get('train/bg_loss', 0):.4f} | bce_loss: {log_dict.get('train/bce_loss', 0):.4f} | dice_loss: {log_dict.get('train/dice_loss', 0):.4f}")
         
@@ -67,7 +68,7 @@ while True:
             try:
                 model.validation_step(val_batch, step_id)
                 metrics = model.val_metrics.compute()
-                print(f"[Val Metrics] DSC: {metrics['dsc']:.4f} | NSD: {metrics['nsd']:.4f} | F1: {metrics['f1']:.4f}")
+                print(f"[Val Metrics] DSC: {metrics['dsc']:.4f}  | F1: {metrics['f1']:.4f}")
                 model.val_metrics.reset()
             except Exception as e:
                 print(f"!!! Validation Pipeline Failed: {e}")

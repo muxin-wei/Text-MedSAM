@@ -9,8 +9,85 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import cv2
 from .utils import pad_image_3d, resize_longest_side_3d
+import bisect
 
+class SliceTextSeg(Dataset):
+    def __init__(
+        self,
+        text_label,
+        meta_json,
+        image_size=256,
+        split='train',
+    ):
+        self.image_size = image_size
+        self.split = split
+        with open(text_label, 'r') as f:
+            self.text_labels = json.load(f)
+        with open(meta_json, 'r') as f:
+            self.meta_data = json.load(f)
+            
+        current_offset = 0
+        self.offset = []
+        for item in self.meta_data:
+            self.offset.append(current_offset)
+            current_offset += item['n_slice']
+            
+        self.total_slices = current_offset
+        
+    def __len__(self):
+        return int(self.total_slices)
 
+    def _get_location(self, idx):
+        vol_idx = bisect.bisect_right(self.starts, idx) - 1
+        slice_idx = idx - self.offset[vol_idx]
+        return vol_idx, slice_idx
+
+    def __getitem__(self, idx):
+        vol_idx, slice_idx = self._get_location(idx)
+        meta_item = self.meta_data[vol_idx]
+        file_path = meta_item['file_path']
+        dataset = meta_item['dataset']
+        try:
+            data = np.load(file_path, mmap_mode='r', allow_pickle=True)
+            image = data['imgs'][slice_idx].copy()
+            mask = data['gts'][slice_idx].copy()
+            text_prompt = self.text_labels.get(dataset, {})
+        except Exception as e:
+            print(f"error loading {file_path}: {e}")
+            return self.__getitem__(np.random.randint(len(self)))
+        image = image[np.newaxis, ...].astype(np.uint8)
+        mask = mask[np.newaxis, ...].astype(np.uint8)
+        image = pad_image_3d(resize_longest_side_3d(image, 256, mode=cv2.INTER_CUBIC))
+        mask = pad_image_3d(resize_longest_side_3d(mask, 256, mode=cv2.INTER_NEAREST))
+        if self.split == 'train':
+            image, mask = random_transform(image, mask)
+        image_tensosr = torch.from_numpy(image).float() / 255.
+
+        valid_keys = [int(k) for k in text_prompt.keys() if k.isdigit()]
+        unique_ids = [v for v in np.unique(mask) if v > 0]
+        if not unique_ids:
+            return{
+                "image": image_tensosr,
+                "mask": torch.from_numpy(mask[np.newaxis, ...]).long(),
+                "text": ['background'],
+                "cls_ids": [0],
+            }
+        is_instance = text_prompt.get('instance_label', 0) == 1
+        target_mask = np.zeros((len(valid_keys), self.image_size, self.image_size), dtype=np.uint8) # K, H, W
+        prompts = []
+        cls_ids = []
+        if is_instance:
+            target_mask = (mask > 0).astype(np.uint8)
+            prompts.append(random.choice(text_prompt[str(valid_keys[0])]))
+            cls_ids.append(str(valid_keys[0]))
+        else:
+            for id in valid_keys:
+                target_mask[id - 1] = (mask == id).astype(np.uint8)
+                prompts
+            
+
+        return
+        
 class TextSeg(Dataset):
     def __init__(self, data_dir, text_label_path, image_size=256,  n_slicing=3, max_instances=5):
         """
@@ -98,7 +175,7 @@ class TextSeg(Dataset):
         
         return{
             "image": img_tensor.unsqueeze(1), # n_slices, 1, h, w
-            "mask": torch.from_numpy(masks[:, np.newaxis, ...]).to(torch.uint8), # n*m, h, w
+            "mask": torch.from_numpy(masks[:, np.newaxis, ...]).to(torch.long), # n*m, h, w
             "mask_ids": mask_ids,
             "text": text_prompt_sep,
             "img_name": osp.basename(file_path).split('.npz')[0]
@@ -140,6 +217,7 @@ class TextSegVal(Dataset):
             return None
         
         images = pad_image_3d(resize_longest_side_3d(imgs, target_length=self.image_size, mode=cv2.INTER_CUBIC))
+        masks = pad_image_3d(resize_longest_side_3d(gts, target_length=256, mode=cv2.INTER_NEAREST))
         if isinstance(images, np.ndarray):
             images = torch.from_numpy(images)
         img_tensor = images.float() / 255.0 
@@ -160,9 +238,10 @@ class TextSegVal(Dataset):
         class_ids =  "&".join(class_ids)
         return {
             "image": img_tensor.squeeze(1),
-            "mask": torch.from_numpy(gts).unsqueeze(1).to(torch.uint8),
+            "mask": torch.from_numpy(masks).unsqueeze(1).to(torch.uint8),
             "text": text_prompt_sep,
             "class_ids": class_ids,
+            "is_instance": is_instance,
             "image_name": osp.basename(file_path).split('.npz')[0]
         }
         

@@ -72,12 +72,11 @@ def unpad_and_resize(image_3d, org_size, curr_size=256):
         image_3d = image_3d[..., pad_h_top : pad_h_top + new_h, 
                                         pad_w_left : pad_w_left + new_w]
 
-        
         resized_volume = F.interpolate(
             image_3d,
             size=(org_h, org_w),
-            mode='nearest',
-            align_corners=False
+            mode='bilinear',
+            align_corners=False,
         )
         
     return resized_volume
