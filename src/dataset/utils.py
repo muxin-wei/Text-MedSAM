@@ -179,6 +179,46 @@ def custom_collate(batch):
 
     raise TypeError(default_collate_err_msg_format.format(elem_type))
 
+def text_seg_collate_fn(batch):
+    batch = [item for item in batch if item is not None]
+    if len(batch) == 0:
+        return {}
+
+    images = []
+    masks = []
+    all_prompts = []
+    all_cls_ids = []
+    
+    batch_indices = [] 
+
+    for i, sample in enumerate(batch):
+        images.append(sample['image']) # 1, H, W
+        curr_mask = sample['mask']
+        masks.append(curr_mask) # K, 1, H, W    
+        k = curr_mask.shape[0]
+        batch_indices.append(torch.full((k,), i, dtype=torch.long)) # image-mask idx
+        prompts = sample['text'].split("[SEP]")
+        all_prompts.extend(prompts)
+        
+        if isinstance(sample['class_ids'], str):
+            c_ids = [int(x) for x in sample['class_ids'].split('&')]
+            all_cls_ids.extend(c_ids)
+        else:
+            all_cls_ids.extend(sample['class_ids'])
+
+    images_tensor = torch.stack(images, dim=0)
+    masks_tensor = torch.cat(masks, dim=0)
+    batch_indices_tensor = torch.cat(batch_indices, dim=0)
+    cls_ids_tensor = torch.tensor(all_cls_ids, dtype=torch.long)
+
+    return {
+        "image": images_tensor,          # (B, 1, H, W)
+        "mask": masks_tensor,            # (Sum_K, H, W) 
+        "text": all_prompts,
+        "class_ids": cls_ids_tensor,
+        "batch_idx": batch_indices_tensor,
+        "img_name": [x['image_name'] for x in batch]
+    }
 
 
 class MaskData:

@@ -66,7 +66,7 @@ class TextSAM(pl.LightningModule):
     def get_input(self, batch):
         images = batch['image']
         masks = batch['mask'].to(torch.long)
-        B, N, C, H, W = images.shape
+        B,
         images = images.reshape(-1, C, H, W).expand(-1, 3, -1, -1)
         B, N, C, H, W = masks.shape
         masks = masks.reshape(-1, C, H, W)

@@ -61,32 +61,40 @@ class SliceTextSeg(Dataset):
         mask = pad_image_3d(resize_longest_side_3d(mask, 256, mode=cv2.INTER_NEAREST))
         if self.split == 'train':
             image, mask = random_transform(image, mask)
-        image_tensosr = torch.from_numpy(image).float() / 255.
+        img_tensor = torch.from_numpy(image).float() / 255.
 
-        valid_keys = [int(k) for k in text_prompt.keys() if k.isdigit()]
-        unique_ids = [v for v in np.unique(mask) if v > 0]
-        if not unique_ids:
-            return{
-                "image": image_tensosr,
-                "mask": torch.from_numpy(mask[np.newaxis, ...]).long(),
-                "text": ['background'],
-                "cls_ids": [0],
-            }
+        valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
+        cls_ids = [id for id in np.unique(mask) if id > 0]
         is_instance = text_prompt.get('instance_label', 0) == 1
-        target_mask = np.zeros((len(valid_keys), self.image_size, self.image_size), dtype=np.uint8) # K, H, W
+        target_mask = []
         prompts = []
-        cls_ids = []
-        if is_instance:
-            target_mask = (mask > 0).astype(np.uint8)
-            prompts.append(random.choice(text_prompt[str(valid_keys[0])]))
-            cls_ids.append(str(valid_keys[0]))
+        has_foreground = np.any(mask > 0)
+        
+        if not has_foreground:
+            target_mask.append(mask)
+            prompts.append("background")
+            cls_ids.append("0")
         else:
-            for id in valid_keys:
-                target_mask[id - 1] = (mask == id).astype(np.uint8)
-                prompts
+            if is_instance:
+                target_mask.append((mask > 0).astype(np.uint8))
+                prompts.append(random.choice(text_prompt[str(valid_keys[0])]))
+                cls_ids = ['1']
+            else:
+                for i, cls_id in enumerate(valid_keys):
+                    target_mask.append((mask == cls_id).astype(np.uint8))
+                    prompts.append(random.choice(text_prompt[str(cls_id)]))
+                    cls_ids.append(str(cls_id))
             
-
-        return
+        prompts = "[SEP]".join(prompts)
+        cls_ids = "&".join(cls_ids)
+        target_mask = torch.from_numpy(np.concatenate(target_mask, axis=0)).long()
+        return{
+            "image": img_tensor,
+            "mask": target_mask,
+            "text": prompts,
+            "cls_ids": cls_ids,
+            "image_name": osp.basename(file_path).split('.npz')[0] + f"_{slice_idx}"
+        }
         
 class TextSeg(Dataset):
     def __init__(self, data_dir, text_label_path, image_size=256,  n_slicing=3, max_instances=5):
