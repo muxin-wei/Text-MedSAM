@@ -1,0 +1,81 @@
+model:
+  target: train.textsamFPN.TextSAM
+  base_learning_rate: 1.0e-05
+  params:
+    image_encoder:
+      target: src.models.visual.image_encoder.repvit_m1_0
+    text_embed_mapper:
+      target: train.textsamFPN.TextEmbeddingBank
+      params:
+        pt_path: /root/autodl-tmp/CVPR-BiomedSegFM/text_embed.pt
+        out_dim: 256
+    maskformer_config:
+      target: src.models.shuffle_former.ShuffleFormer
+      params:
+        embed_dim: 256
+        depth: 2
+        num_heads: 8
+        mlp_ratio: 4.0
+        use_ape: false
+        use_fusion: true
+        window_size:
+        - 2
+        - 4
+        - 4
+        uns_size:
+        - 2
+        - 8
+        - 8
+        n_mlp_blocks: 2
+        in_chans:
+        - 448
+        - 112
+        - 56
+    maskdecoder_config:
+      target: src.models.shuffle_former.Text2Mask
+    loss_configs:
+      target: src.losses.losses.TextSegLoss
+    image_size: 256
+    hidden_dim: 256
+    checkpoint: /root/autodl-tmp/Text-MedSAM/logs/19_epoch/checkpoints/epoch=0019-step=075000.ckpt
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 16
+    num_workers: 4
+    train:
+      target: src.dataset.textseg.SliceTextSeg
+      params:
+        data_dir: /root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/train10p.txt
+        gts_dir: /root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/gts
+        text_embed: /root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/text_embed.pt
+        meta_json: /root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/CVPR25_TextSegFMData_with_class.json
+lightning:
+  callbacks:
+    image_logger:
+      target: utils.helper.ImageLogger
+      params:
+        batch_frequency: 200
+        max_images: 4
+        increase_log_steps: false
+  logger:
+    target: lightning.pytorch.loggers.WandbLogger
+    params:
+      project: TextSAM-U_10p
+      name: ${nowname}
+      save_dir: ${logdir}
+      log_model: all
+      save_code: true
+      tags:
+      - textsam
+      - text-guided
+      - large-scale
+      group: textsam-v2
+      notes: TextSAM with EMA + Prototype Contrastive Loss
+  trainer:
+    max_epochs: 100
+    accelerator: gpu
+    num_sanity_val_steps: 0
+    limit_val_batches: 0
+    precision: bf16-mixed
+    sync_batchnorm: true

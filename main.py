@@ -1,12 +1,14 @@
 import argparse, os, sys, datetime, glob, importlib
 import torch, warnings
-from omegaconf import OmegaConf
+import omegaconf
 from torch.utils.data import DataLoader, Dataset
 import lightning.pytorch as L
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger, CSVLogger
-from utils.helper import SetupCallback, ImageLogger 
+from utils import SetupCallback 
+from omegaconf import OmegaConf, DictConfig, ListConfig
 
+torch.serialization.safe_globals([omegaconf.base.ContainerMetadata])
 warnings.filterwarnings("ignore")
 
 
@@ -28,7 +30,6 @@ def parse_args():
     parser.add_argument("-p", "--project", help="project name/path")
     parser.add_argument("-d", "--debug", type=str2bool, default=False, help="enable debugging")
     parser.add_argument("-s", "--seed", type=int, default=42, help="random seed")
-    parser.add_argument("-f", "--postfix", type=str, default="", help="extra postfix")
     
     return parser.parse_known_args()
 
@@ -40,7 +41,7 @@ class DataModuleFromConfig(L.LightningDataModule):
         self.configs = {k: v for k, v in zip(["train", "validation", "test"], [train, validation, test]) if v}
         self.num_workers = num_workers or batch_size * 2
         self.datasets = {} 
-
+    
     def setup(self, stage=None):
         self.datasets = {k: instantiate_from_config(cfg) for k, cfg in self.configs.items()}
 
@@ -52,9 +53,8 @@ class DataModuleFromConfig(L.LightningDataModule):
         if split not in self.datasets:
             return None
         return DataLoader(self.datasets[split], 
-                          batch_size=self.batch_size,
+                          batch_size= self.batch_size if split == "train" else self.batch_size * 2,
                           num_workers=self.num_workers, 
-                        #   shuffle=False,
                           shuffle=(split == "train")
                         ) 
 
@@ -85,20 +85,71 @@ def main():
         nowname = os.path.basename(logdir)
     else:
         cfg_name = os.path.splitext(os.path.basename(opt.base[0]))[0] if opt.base else ""
-        nowname = f"{datetime.datetime.now():%Y-%m-%dT%H-%M-%S}_{cfg_name or 'run'}{opt.postfix}{f'_{opt.name}' if opt.name else ''}"
+        nowname = f"{cfg_name or 'run'}_{datetime.datetime.now():%Y-%m-%dT%H-%M-%S}"
+        if opt.name:
+            nowname = f"{opt.name}_{nowname}"
         logdir = os.path.join("logs", nowname)
         ckpt_path = None
     
     configs = [OmegaConf.load(c) for c in opt.base]
     cli = OmegaConf.from_dotlist(unknown)
     config = OmegaConf.merge(*configs, cli)
+    OmegaConf.set_struct(config, False)
     
+    config.nowname = nowname
+    config.logdir = logdir
     lightning_config = config.get("lightning", OmegaConf.create())
     trainer_cfg = lightning_config.get("trainer", OmegaConf.create())
     ckptdir, cfgdir = os.path.join(logdir, "checkpoints"), os.path.join(logdir, "configs")
     os.makedirs(cfgdir, exist_ok=True)
     L.seed_everything(opt.seed)
     
+    logger_list = []
+    logger_list = []
+    if lightning_config.get("logger") is not None:
+        logger_cfg = lightning_config.logger
+        if not isinstance(logger_cfg, (list, tuple, ListConfig)):
+            logger_cfg = [logger_cfg]
+            
+        for i, cfg in enumerate(logger_cfg):            
+            try:
+                if isinstance(cfg, str):
+                    if cfg.lower() in ["wandb", "wandblogger"]:
+                        cfg = {
+                            "target": "lightning.pytorch.loggers.WandbLogger",
+                            "params": {
+                                "save_dir": logdir,
+                                "name": nowname,
+                                "project": opt.project,
+                                "reinit": True,
+                                "id": "repvit_ft_2026-03-16T08-52-28",
+                                "resume": "allow"
+                            }
+                        }
+                    elif cfg.lower() in ["tensorboard", "tb"]:
+                        cfg = {"target": "lightning.pytorch.loggers.TensorBoardLogger", "params": {"save_dir": logdir, "name": "tb"}}
+                
+                if isinstance(cfg, (dict, DictConfig)):
+                    if isinstance(cfg, DictConfig):
+                        cfg = OmegaConf.to_container(cfg, resolve=True)
+                    else:
+                        cfg = dict(cfg)
+                    params = cfg.get("params", {})
+                    params["save_dir"] = logdir
+                    params["name"] = nowname
+                    params.setdefault("project", opt.project or "")
+                    params.setdefault("reinit", True)
+                    cfg["params"] = params
+            
+                    logger_instance = instantiate_from_config(cfg)
+                    logger_list.append(logger_instance)
+                    
+            except Exception as e:
+                print(f"error : {e}")
+                raise e
+    if len(logger_list) == 0:
+        logger_list = [TensorBoardLogger(save_dir=logdir, name="tb")]
+    logger = logger_list[0] if len(logger_list) == 1 else logger_list
     model = instantiate_from_config(config.model)
     data = instantiate_from_config(config.data)
 
@@ -119,23 +170,23 @@ def main():
             ngpu = len([d for d in devices.strip(",").split(',') if d.strip()])
     ngpu = max(1, ngpu)
     accumulate = trainer_cfg.get("accumulate_grad_batches", 1)
-    model.learning_rate = accumulate * ngpu * config.data.params.batch_size * config.model.base_learning_rate 
-    print(f"LR={model.learning_rate:.2e} = {accumulate} (accum) * {ngpu} (gpus) * {config.data.params.batch_size} (bs) * {config.data.params.train.params.n_slicing} (slices) * {config.model.base_learning_rate:.2e} (base_lr)")
+    model.learning_rate = accumulate * ngpu * config.data.params.batch_size * config.model.base_learning_rate
+    print(f"LR={model.learning_rate:.2e} = {accumulate} (accum) * {ngpu} (gpus) * {config.data.params.batch_size} (bs) * {config.model.base_learning_rate:.2e} (base_lr)")
     
     callbacks_cfg = {
                 "setup": {"target": "main.SetupCallback", "params": {"resume": opt.resume, "now": nowname, "logdir": logdir, "ckptdir": ckptdir, "cfgdir": cfgdir, "config": config, "lightning_config": lightning_config}},
                 "lr_monitor": {"target": "main.LearningRateMonitor", "params": {"logging_interval": "step"}},
-                "checkpoint": {"target": "main.ModelCheckpoint", "params": {"dirpath": ckptdir, "filename": "{epoch:04d}-{step:06d}", "save_last": True, "every_n_train_steps": 1000}},
+                "checkpoint": {"target": "main.ModelCheckpoint", "params": {"dirpath": ckptdir, "filename": "{epoch:04d}-{step:06d}-{val/acc:.4f}", "save_last": True, "monitor": "val/acc", "save_top_k": 1, "mode":'max'}},
             }
     
     callbacks_cfg = OmegaConf.merge(callbacks_cfg, lightning_config.get("callbacks", {}))
     
     trainer_kwargs = {
         "accelerator": "auto", 
-        "strategy": "ddp_find_unused_parameters_true", 
+        "strategy": "ddp", 
         "devices": "auto",
         **trainer_cfg,
-        "logger": TensorBoardLogger(save_dir=logdir, name="tb"),
+        "logger": logger,
         "callbacks": [
             instantiate_from_config(cfg) for cfg in callbacks_cfg.values()
         ],
@@ -157,6 +208,9 @@ def main():
     signal.signal(signal.SIGUSR1, melk)
     signal.signal(signal.SIGUSR2, divein)
     
+    if isinstance(logger, WandbLogger):
+        logger.watch(model, log="gradients", log_freq=100)
+        
     if opt.train:
         try: 
             trainer.fit(model, data, ckpt_path=ckpt_path)
@@ -165,7 +219,29 @@ def main():
             raise
     
     if not opt.no_test and not trainer.interrupted:
-        trainer.test(model, data)
+        checkpoint_callback = trainer.checkpoint_callback
+        
+        # 1. Best Checkpoint
+        best_ckpt = checkpoint_callback.best_model_path if checkpoint_callback else None
+        if not best_ckpt or not os.path.exists(best_ckpt):
+            best_ckpt = sorted(glob.glob(os.path.join(ckptdir, "*epoch*/*.ckpt"), recursive=True))[-1]
+            
+        if best_ckpt and os.path.exists(best_ckpt):
+            # model.test_prefix = "best"
+            print(f"[INFO] Testing BEST checkpoint: {best_ckpt}")
+            print(f"[INFO] ========================================\n")
+            trainer.test(model, data, ckpt_path=best_ckpt, weights_only=False)
+        
+        # 2. Last Checkpoint
+        # last_ckpt = checkpoint_callback.last_model_path if checkpoint_callback else None
+        # if not last_ckpt or not os.path.exists(last_ckpt):
+        #     last_ckpt = os.path.join(ckptdir, "last.ckpt")
+            
+        # if last_ckpt and os.path.exists(last_ckpt):
+        #     model.test_prefix = "last"
+        #     print(f"[INFO] Testing LAST checkpoint: {last_ckpt}")
+        #     print(f"[INFO] ========================================\n")
+        #     trainer.test(model, data, ckpt_path=last_ckpt, weights_only=False)
     
     if opt.debug and not opt.resume and trainer.global_rank == 0:
         dst = os.path.join("debug_runs", os.path.basename(logdir))
@@ -175,4 +251,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main()  

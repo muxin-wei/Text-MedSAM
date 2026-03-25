@@ -7,7 +7,7 @@ from typing import Union
 import torch
 import torch.nn as nn
 from torch.nn.modules.loss import _Loss
-
+import torch.nn.functional as F
 
 def one_hot(
     labels: torch.Tensor,
@@ -250,40 +250,57 @@ class MedSamLoss(_Loss):
     and both losses use mean reduction.
     """
 
-    def __init__(self, reduction: str = "mean"):
-        """
-        Initializes the CombinedDiceBCELoss class without additional parameters.
-        """
-        super(MedSamLoss, self).__init__()
-        # Initialize DiceLoss with specific parameters
-        self.dice_loss = DiceLoss(sigmoid=True, squared_pred=True, reduction=reduction)
-        # Initialize BCEWithLogitsLoss with mean reduction
-        self.ce_loss = nn.BCEWithLogitsLoss(reduction=reduction)
+    def __init__(self, reduction="none"):
+        super().__init__()
+        self.focal_loss = BinaryFocalLoss(alpha=0.25, gamma=2.0, reduction=reduction)
         self.reduction = reduction
-
+        self.dice_loss = DiceLoss(sigmoid=True, squared_pred=True, reduction=reduction)
+            
     def forward(self, inputs, targets, split='train'):
         """
-        Forward pass computing the combined Dice and BCE loss.
-
-        :param inputs: The predictions made by the model.
-        :param targets: The ground truth labels.
+        Forward pass computing the combined Dice and Focal loss.
         """
-        # Compute Dice loss
+        # Compute losses
         dice_loss = self.dice_loss(inputs, targets)
-        # Compute BCE loss
-        bce_loss = self.ce_loss(
-            inputs, targets.float()
-        )  # Ensure targets are float for BCE loss
+        focal_loss = self.focal_loss(inputs, targets.float())
+        
         if self.reduction == "none":
-            # average all non-batch dimensions
-            bce_loss = bce_loss.mean(dim=tuple(range(1, len(bce_loss.shape))))
-            dice_loss = dice_loss.mean(dim=tuple(range(1, len(dice_loss.shape))))
-            
-        combined_loss = dice_loss + bce_loss
+            focal_loss = focal_loss.mean(dim=tuple(range(1, len(focal_loss.shape))))
+            if dice_loss.ndim > 1:
+                dice_loss = dice_loss.mean(dim=tuple(range(1, len(dice_loss.shape))))
+        
+        combined_loss = 1.0 * dice_loss + 20.0 * focal_loss
 
         log_dict = {
-            f"{split}/bce_loss": bce_loss.detach(),
-            f"{split}/dice_loss": dice_loss.detach(),
+            f"{split}/dice_loss": dice_loss.detach().mean(),
+            f"{split}/focal_loss": focal_loss.detach().mean(),
         }
-        
+
         return combined_loss, log_dict
+    
+class BinaryFocalLoss(nn.Module):
+    """
+    Numerically stable Binary Focal Loss taking logits directly.
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        # BCE with logits is numerically stable
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        
+        probs = torch.sigmoid(logits)
+        pt = targets * probs + (1 - targets) * (1 - probs)
+        alpha_t = targets * self.alpha + (1 - targets) * (1 - self.alpha)
+        
+        focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+        
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss

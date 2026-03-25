@@ -186,7 +186,6 @@ class Attention(nn.Module):
     An attention layer that allows for downscaling the size of the embedding
     after projection to queries, keys, and values.
     """
-
     def __init__(
         self,
         embedding_dim: int,
@@ -201,25 +200,26 @@ class Attention(nn.Module):
             self.internal_dim % num_heads == 0
         ), "num_heads must divide embedding_dim."
 
-        # linear transformation from embedding dim to internal network dim
+        self.head_dim = self.internal_dim // self.num_heads
+
         self.q_proj = nn.Linear(embedding_dim, self.internal_dim) 
         self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.out_proj = nn.Linear(self.internal_dim, embedding_dim) 
-        # transformation from internal dim to embeeding dim
+        
+        self.rope = RotaryEmbedding(dim=self.head_dim)
 
-        # split x (k, q, v) into seperate heads 
-    def _separate_heads(self, x: Tensor, num_heads: int) -> Tensor:
-        b, n, c = x.shape # x.shape = (B, N_tokens, C) C (int) - Dimension of each token
-        x = x.reshape(b, n, num_heads, c // num_heads) # split x along c 
+    def _separate_heads(self, x: torch.Tensor, num_heads: int) -> torch.Tensor:
+        b, n, c = x.shape
+        x = x.reshape(b, n, num_heads, c // num_heads) 
         return x.transpose(1, 2)  # B x N_heads x N_tokens x C_per_head
 
-    def _recombine_heads(self, x: Tensor) -> Tensor:
+    def _recombine_heads(self, x: torch.Tensor) -> torch.Tensor:
         b, n_heads, n_tokens, c_per_head = x.shape
         x = x.transpose(1, 2)
-        return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
+        return x.contiguous().reshape(b, n_tokens, n_heads * c_per_head) 
 
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         # Input projections 
         q = self.q_proj(q)
         k = self.k_proj(k)
@@ -230,82 +230,59 @@ class Attention(nn.Module):
         k = self._separate_heads(k, self.num_heads)
         v = self._separate_heads(v, self.num_heads)
 
+        seq_len_q = q.shape[2]
+        seq_len_k = k.shape[2]
+        
+        max_len = max(seq_len_q, seq_len_k)
+        cos, sin = self.rope(max_len, q.device)
+        cos = cos.unsqueeze(0)                               # [1, 1, max_len, head_dim]
+        sin = sin.unsqueeze(0)
+        
+        cos_q, sin_q = cos[:, :, :seq_len_q, :], sin[:, :, :seq_len_q, :]
+        cos_k, sin_k = cos[:, :, :seq_len_k, :], sin[:, :, :seq_len_k, :]
+        
+        q, _ = apply_rotary_emb_1d(q, q, cos_q, sin_q)
+        k, _ = apply_rotary_emb_1d(k, k, cos_k, sin_k) 
+
         # Attention (dot product)
-        _, _, _, c_per_head = q.shape # B X N_heads X N_tokens X C_per_head
-        attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-        attn = attn / math.sqrt(c_per_head) # sqrt(c_per_head) as each head with c_per_head dim
+        _, _, _, c_per_head = q.shape
+        attn = q @ k.transpose(-2, -1) / math.sqrt(c_per_head)
         attn = torch.softmax(attn, dim=-1)
 
         # Get output
-        out = attn @ v # (q @ k^T)/ sqrt(dim_k) @ v 
-        out = self._recombine_heads(out) # concat
-        out = self.out_proj(out) # linear
-
+        out = attn @ v 
+        out = self._recombine_heads(out) 
+        out = self.out_proj(out) 
         return out
 
 
-def init_random_2d_freqs(dim: int, num_heads: int, theta: float = 10.0, rotate: bool = True):
-    freqs_x = []
-    freqs_y = []
-    mag = 1 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
-    for i in range(num_heads):
-        angles = torch.rand(1) * 2 * torch.pi if rotate else torch.zeros(1)        
-        fx = torch.cat([mag * torch.cos(angles), mag * torch.cos(torch.pi/2 + angles)], dim=-1)
-        fy = torch.cat([mag * torch.sin(angles), mag * torch.sin(torch.pi/2 + angles)], dim=-1)
-        freqs_x.append(fx)
-        freqs_y.append(fy)
-    freqs_x = torch.stack(freqs_x, dim=0)
-    freqs_y = torch.stack(freqs_y, dim=0)
-    freqs = torch.stack([freqs_x, freqs_y], dim=0)
-    return freqs
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, max_seq_len: int = 4096 * 4, theta: float = 10000.0):
+        super().__init__()
+        self.dim = dim
+        self.max_seq_len = max_seq_len
+        self.theta = theta
 
-def compute_mixed_cis(freqs: torch.Tensor, t_x: torch.Tensor, t_y: torch.Tensor, num_heads: int):
-    N = t_x.shape[0]
-    depth = freqs.shape[1]
-    # No float 16 for this range
-    with torch.cuda.amp.autocast(enabled=False):
-        freqs_x = (t_x.unsqueeze(-1) @ freqs[0].unsqueeze(-2)).view(depth, N, num_heads, -1).permute(0, 2, 1, 3)
-        freqs_y = (t_y.unsqueeze(-1) @ freqs[1].unsqueeze(-2)).view(depth, N, num_heads, -1).permute(0, 2, 1, 3)
-        freqs_cis = torch.polar(torch.ones_like(freqs_x), freqs_x + freqs_y)
-                    
-    return freqs_cis
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+    def forward(self, seq_len: int, device):
+        t = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)           # [seq_len, dim//2]
+        emb = torch.cat((freqs, freqs), dim=-1)         # [seq_len, dim]
+        return emb.cos().unsqueeze(0), emb.sin().unsqueeze(0)   # [1, seq_len, dim]
 
-def compute_axial_cis(dim: int, end_x: int, end_y: int, theta: float = 100.0):
-    freqs_x = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
-    freqs_y = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
+def apply_rotary_emb_1d(q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
+    """1D RoPE"""
+    q1, q2 = q[..., :q.shape[-1]//2], q[..., q.shape[-1]//2:]
+    k1, k2 = k[..., :k.shape[-1]//2], k[..., k.shape[-1]//2:]
 
-    t_x, t_y = init_t_xy(end_x, end_y)
-    freqs_x = torch.outer(t_x, freqs_x)
-    freqs_y = torch.outer(t_y, freqs_y)
-    freqs_cis_x = torch.polar(torch.ones_like(freqs_x), freqs_x)
-    freqs_cis_y = torch.polar(torch.ones_like(freqs_y), freqs_y)
-    return torch.cat([freqs_cis_x, freqs_cis_y], dim=-1)
+    q_rot = torch.cat((-q2, q1), dim=-1)
+    k_rot = torch.cat((-k2, k1), dim=-1)
 
-def init_t_xy(end_x: int, end_y: int):
-    t = torch.arange(end_x * end_y, dtype=torch.float32)
-    t_x = (t % end_x).float()
-    t_y = torch.div(t, end_x, rounding_mode='floor').float()
-    return t_x, t_y
-
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    if freqs_cis.shape == (x.shape[-2], x.shape[-1]):
-        shape = [d if i >= ndim-2 else 1 for i, d in enumerate(x.shape)]
-    elif freqs_cis.shape == (x.shape[-3], x.shape[-2], x.shape[-1]):
-        shape = [d if i >= ndim-3 else 1 for i, d in enumerate(x.shape)]
-        
-    return freqs_cis.view(*shape)
-
-def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
+    q = q * cos + q_rot * sin
+    k = k * cos + k_rot * sin
+    return q, k
 
 
 class Layer_scale_init_Block(nn.Module):

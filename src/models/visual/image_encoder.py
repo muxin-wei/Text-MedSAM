@@ -396,46 +396,46 @@ class RepViT(nn.Module):
                  img_size=256):
         super(RepViT, self).__init__()
         self.cfgs = cfgs
-
         self.img_size = img_size
-
         input_channel = self.cfgs[0][2]
         
-        patch_embed = torch.nn.Sequential(Conv2d_BN(3, input_channel // 2, 3, 1, 1), torch.nn.GELU(),
-                           Conv2d_BN(input_channel // 2, input_channel, 3, 1, 1)) 
+        patch_embed = torch.nn.Sequential(
+            Conv2d_BN(3, input_channel // 2, 3, 1, 1), 
+            torch.nn.GELU(),
+            Conv2d_BN(input_channel // 2, input_channel, 3, 1, 1)
+        ) 
         
         layers = [patch_embed]
         block = RepViTBlock
-        for k, t, c, use_se, use_hs, s in self.cfgs:
+        
+        # Track indices where downsampling occurs
+        self.return_indices = []
+        
+        for i, (k, t, c, use_se, use_hs, s) in enumerate(self.cfgs):
             output_channel = _make_divisible(c, 8)
             exp_size = _make_divisible(input_channel * t, 8)
             layers.append(block(input_channel, exp_size, output_channel, k, s, use_se, use_hs))
             input_channel = output_channel
+            if s == 2 and i > 0:
+                self.return_indices.append(i)
         self.features = nn.ModuleList(layers)
+        self.return_indices.append(len(self.features) - 1)
         
         self.neck = nn.Sequential(
-            nn.Conv2d(
-                output_channel,
-                256,
-                kernel_size=1,
-                bias=False,
-            ),
+            nn.Conv2d(output_channel, 256, kernel_size=1, bias=False),
             LayerNorm2d(256),
-            nn.Conv2d(
-                256,
-                256,
-                kernel_size=3,
-                padding=1,
-                bias=False,
-            ),
+            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
             LayerNorm2d(256),
         )
 
     def forward(self, x):
-        for f in self.features:
+        multi_scale_features = []
+        for i, f in enumerate(self.features):
             x = f(x)
-        x = self.neck(x)
-        return x
+            if i in self.return_indices:
+                multi_scale_features.append(x)
+        multi_scale_features.append(self.neck(x))
+        return multi_scale_features, multi_scale_features[-1]
     
 def repvit_m1_0(**kwargs):
     """

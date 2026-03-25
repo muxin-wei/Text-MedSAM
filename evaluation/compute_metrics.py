@@ -37,15 +37,14 @@ def compute_multi_class_nsd(gt, seg, spacing, tolerance=2.0):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-s', '--seg_dir', default='test_demo/segs', type=str)
-parser.add_argument('-g', '--gt_dir', default='test_demo/gts', type=str)
-parser.add_argument('-csv_dir', default='test_demo', type=str)
+parser.add_argument('-g', '--gt_dir', default='/root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/3D_val_gt/3D_val_gt_text', type=str)
 parser.add_argument('-num_workers', type=int, default=8)
 parser.add_argument('-nsd', default=True, type=bool, help='set it to False to disable NSD computation and save time')
 args = parser.parse_args()
 
 seg_dir = args.seg_dir
 gt_dir = args.gt_dir
-csv_dir =join(args.csv_dir ,'metrics.csv') 
+csv_dir =join(args.seg_dir,'metrics.csv') 
 num_workers = args.num_workers
 compute_NSD = args.nsd
 
@@ -81,7 +80,7 @@ if __name__ == '__main__':
     if compute_NSD:
         seg_metrics['nsd'] = []
     
-    npz_names = listdir(gt_dir)
+    npz_names = listdir(seg_dir)
     npz_names = [npz_name for npz_name in npz_names if npz_name.endswith('.npz')]
     with mp.Pool(num_workers) as pool:
         with tqdm(total=len(npz_names)) as pbar:

@@ -5,95 +5,64 @@ import json
 import random
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 import cv2
-from .utils import pad_image_3d, resize_longest_side_3d
+from .utils import pad_image_3d, resize_longest_side_3d, resize_longest_side_2d, pad_image_2d
 import bisect
 
 class SliceTextSeg(Dataset):
-    def __init__(
-        self,
-        text_label,
-        meta_json,
-        image_size=256,
-        split='train',
-    ):
-        self.image_size = image_size
-        self.split = split
-        with open(text_label, 'r') as f:
-            self.text_labels = json.load(f)
-        with open(meta_json, 'r') as f:
-            self.meta_data = json.load(f)
-            
-        current_offset = 0
-        self.offset = []
-        for item in self.meta_data:
-            self.offset.append(current_offset)
-            current_offset += item['n_slice']
-            
-        self.total_slices = current_offset
-        
-    def __len__(self):
-        return int(self.total_slices)
+    def __init__(self, data_dir, gts_dir, text_embed, meta_json):
+        with open(data_dir, 'r') as f:
+            self.npy_files = [line.strip() for line in f.readlines() if line.strip()]
+        self.gts_dir = gts_dir
+        info = torch.load(text_embed, map_location='cpu')
+        self.dataset2id = info['dataset2id']
+        self.class2id = info['class2id']
+        self.is_instance_dict = {}
+        self.valid_label_dict = {}
 
-    def _get_location(self, idx):
-        vol_idx = bisect.bisect_right(self.starts, idx) - 1
-        slice_idx = idx - self.offset[vol_idx]
-        return vol_idx, slice_idx
+        with open(meta_json, 'r') as f:
+            meta_data = json.load(f)
+            for k in meta_data.keys():
+                self.valid_label_dict[k] = set([int(v) for v in meta_data[k] if v != "instance_label"])
+                self.is_instance_dict[k] = bool(meta_data[k]["instance_label"])
+                
+    def __len__(self):
+        return int(len(self.npy_files))
 
     def __getitem__(self, idx):
-        vol_idx, slice_idx = self._get_location(idx)
-        meta_item = self.meta_data[vol_idx]
-        file_path = meta_item['file_path']
-        dataset = meta_item['dataset']
-        try:
-            data = np.load(file_path, mmap_mode='r', allow_pickle=True)
-            image = data['imgs'][slice_idx].copy()
-            mask = data['gts'][slice_idx].copy()
-            text_prompt = self.text_labels.get(dataset, {})
-        except Exception as e:
-            print(f"error loading {file_path}: {e}")
-            return self.__getitem__(np.random.randint(len(self)))
-        image = image[np.newaxis, ...].astype(np.uint8)
-        mask = mask[np.newaxis, ...].astype(np.uint8)
-        image = pad_image_3d(resize_longest_side_3d(image, 256, mode=cv2.INTER_CUBIC))
-        mask = pad_image_3d(resize_longest_side_3d(mask, 256, mode=cv2.INTER_NEAREST))
-        if self.split == 'train':
-            image, mask = random_transform(image, mask)
-        img_tensor = torch.from_numpy(image).float() / 255.
-
-        valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
-        cls_ids = [id for id in np.unique(mask) if id > 0]
-        is_instance = text_prompt.get('instance_label', 0) == 1
-        target_mask = []
-        prompts = []
-        has_foreground = np.any(mask > 0)
+        file_path = self.npy_files[idx]
+        filename = os.path.basename(file_path)
+        img = np.load(file_path, mmap_mode='r', allow_pickle=True).astype(np.float32)
+        gts = np.load(osp.join(self.gts_dir, filename), mmap_mode='r', allow_pickle=True)
+        img_np = (img - img.min())  / (img.max() - img.min() + 1e-6)
+        img_tensor = torch.from_numpy(img_np).unsqueeze(0)
         
-        if not has_foreground:
-            target_mask.append(mask)
-            prompts.append("background")
-            cls_ids.append("0")
+        ds_name = osp.basename(osp.dirname(file_path))
+        ds_id = self.dataset2id[ds_name]
+        is_instance = self.is_instance_dict.get(ds_name, False)
+        
+        # segment target sample
+        present_ids = np.unique(gts)
+        present_ids = present_ids[present_ids > 0]
+        if not is_instance:
+            valid_ids = [k for k in present_ids if k in self.valid_label_dict[ds_name]]
         else:
-            if is_instance:
-                target_mask.append((mask > 0).astype(np.uint8))
-                prompts.append(random.choice(text_prompt[str(valid_keys[0])]))
-                cls_ids = ['1']
-            else:
-                for i, cls_id in enumerate(valid_keys):
-                    target_mask.append((mask == cls_id).astype(np.uint8))
-                    prompts.append(random.choice(text_prompt[str(cls_id)]))
-                    cls_ids.append(str(cls_id))
-            
-        prompts = "[SEP]".join(prompts)
-        cls_ids = "&".join(cls_ids)
-        target_mask = torch.from_numpy(np.concatenate(target_mask, axis=0)).long()
+            valid_ids = present_ids
+        if len(valid_ids) < 1:
+            print(f"{ds_name} --- {filename}\n valid: {self.valid_label_dict[ds_name]}\n exists:{present_ids}")
+        target_id = random.choice(valid_ids)
+        target_mask = torch.from_numpy(gts == target_id).float()
+        cls_label = "1" if is_instance else str(target_id)
+        c_id = self.class2id[ds_id].get(cls_label, 0)
+        
+        target_mask = target_mask.unsqueeze(0)
+        
         return{
             "image": img_tensor,
             "mask": target_mask,
-            "text": prompts,
-            "cls_ids": cls_ids,
-            "image_name": osp.basename(file_path).split('.npz')[0] + f"_{slice_idx}"
+            "cls_id": c_id,
+            "ds_id": ds_id,
         }
         
 class TextSeg(Dataset):
@@ -189,70 +158,140 @@ class TextSeg(Dataset):
             "img_name": osp.basename(file_path).split('.npz')[0]
         }
 
-class TextSegVal(Dataset):
-    def __init__(
-        self,
-        data_dir,
-        text_label_path,
-        image_size = 256,
-    ):
-        self.data_dir = data_dir
+class TextSegRandomSlice(Dataset):
+    def __init__(self, txt_path, meta_json, image_size=256, max_instances=5):
         self.image_size = image_size
-        with open(text_label_path, 'r') as f:
-            self.text_labels = json.load(f)
-        valid_keys = set(self.text_labels.keys())
-        self.samples = glob.glob(osp.join(data_dir, '**/*.npz'),recursive=True)
-        self.samples = sorted([
-            file_path 
-            for file_path in self.samples 
-            if osp.basename(osp.dirname(file_path)) in valid_keys
-        ])
-        
+        self.max_instances = max_instances
+        with open(txt_path, 'r') as f:
+            self.npz_paths = [line.strip() for line in f if line.strip()]
+        with open(meta_json, 'r') as f:
+            self.slice_info = json.load(f)
+        self.global_index = []
+        for fname in self.npz_paths:
+            if fname not in self.slice_info:
+                print(f"{fname} not found in json, skipping.")
+                continue
+            valid_slcies = self.slice_info[fname]["non_empty_slices"]
+            for idx in valid_slcies:
+                self.global_index.append((fname, idx))
+            
     def __len__(self):
-        return len(self.samples)
-    
+        return len(self.npz_paths)
+
     def __getitem__(self, idx):
-        file_path = self.samples[idx]
+        file_path = self.npz_paths[idx]
+        filename = osp.basename(file_path)
         dataset_name = osp.basename(osp.dirname(file_path))
         
+        if filename not in self.slice_info:
+            return self.__getitem__(random.randint(0, len(self)-1))
+
+        valid_slices = self.slice_info[filename].get('non_empty_slices', [])
+        if not valid_slices:
+             return self.__getitem__(random.randint(0, len(self)-1))
+             
+        slice_idx = random.choice(valid_slices)
+        
         try:
-            data = np.load(file_path)
-            imgs = data['imgs'] # Shape: (D, H, W)
-            gts = data['gts']   # Shape: (D, H, W)
-            text_prompt = self.text_labels[dataset_name]
+            data = np.load(file_path, allow_pickle=True)
+            image = data['imgs'][slice_idx]
+            mask = data['gts'][slice_idx]
+            text_prompt = self.text_labels.get(dataset_name, {})
         except Exception as e:
-            print(f'error loading {file_path}: {e}')
-            return None
+            print(f"Error loading {file_path}: {e}")
+            return self.__getitem__(random.randint(0, len(self)-1))
         
-        images = pad_image_3d(resize_longest_side_3d(imgs, target_length=self.image_size, mode=cv2.INTER_CUBIC))
-        masks = pad_image_3d(resize_longest_side_3d(gts, target_length=256, mode=cv2.INTER_NEAREST))
-        if isinstance(images, np.ndarray):
-            images = torch.from_numpy(images)
-        img_tensor = images.float() / 255.0 
-        
-        valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
-        is_instance = text_prompt.get('instance_label') == 1
-        prompts = []
-        class_ids = []
-        if is_instance:
-            prompts.append(random.choice((text_prompt[str(cls_id)])))
-            class_ids = ["1"]
-        else:
-            for cls_id in valid_keys:
-                prompts.append(random.choice(text_prompt[str(cls_id)]))
-                class_ids.append(str(cls_id))
-                
-        text_prompt_sep = "[SEP]".join(prompts)
-        class_ids =  "&".join(class_ids)
+        image = image[np.newaxis, ...]
+        mask = mask[np.newaxis, ...]
+            
         return {
-            "image": img_tensor.squeeze(1),
-            "mask": torch.from_numpy(masks).unsqueeze(1).to(torch.uint8),
+            "image": img_tensor,
+            "mask": mask_tensor,
+            "mask_ids": mask_ids,
             "text": text_prompt_sep,
-            "class_ids": class_ids,
-            "is_instance": is_instance,
-            "image_name": osp.basename(file_path).split('.npz')[0]
+            "img_name": f"{filename.split('.npz')[0]}_{slice_idx}"
+        }
+
+class TextSegVal(Dataset):
+    def __init__(self, gts_dir, meta_json=None, image_size=256):
+        """
+        meta_json: 预生成的切片索引 JSON 路径
+        """
+        self.gts_dir = gts_dir
+        self.image_size = image_size
+        self.slice_map = []
+
+        # 🌟 优先从 JSON 加载索引，极大提升启动速度
+        if meta_json and os.path.exists(meta_json):
+            print(f"正在从缓存加载验证集索引: {meta_json}")
+            with open(meta_json, 'r') as f:
+                self.slice_map = json.load(f)
+
+                    
+    def __len__(self):
+        return len(self.slice_map)
+    
+    def __getitem__(self, idx): 
+        meta = self.slice_map[idx]
+        file_path = meta["file_path"]
+        s_idx = meta["slice_idx"]
+        
+        # 🌟 核心：只加载单张切片，显存占用极低
+        img_data = np.load(file_path, allow_pickle=True)
+        # 自动定位对应的 GT 文件
+        gt_path = file_path.replace("3D_val_npz", "3D_val_gt/3D_val_gt_text")
+        gt_data = np.load(gt_path)
+        
+        imgs = img_data['imgs'][s_idx]  # (H, W)
+        gts = gt_data['gts'][s_idx]     # (H, W)
+        h, w = imgs.shape[-2:]
+        text_prompt = img_data["text_prompts"].tolist()
+        # resize + pad 使用完全相同的函数（和 train 一致）
+        imgs_res = resize_longest_side_2d(imgs, target_length=256, mode=cv2.INTER_CUBIC)
+        gts_res  = resize_longest_side_2d(gts,  target_length=256, mode=cv2.INTER_NEAREST)
+        
+        images = pad_image_2d(imgs_res)   # (D, 256, 256)
+        masks  = pad_image_2d(gts_res)    # (D, 256, 256)
+        
+        # 保存所有重建信息（保证 100% 完整性）
+        pad_info = {
+            "original_shape": (h, w),   # (D_orig, H_orig, W_orig)
+            "padded_shape": images.shape,       # (D, 256, 256)
+            "image_name": osp.basename(file_path).split('.npz')[0],
+            "file_path": file_path
         }
         
+        # 转 tensor 并转成模型需要的格式
+        images = torch.from_numpy(images).float()         # (D, 256, 256)
+        images = (images - images.min()) / (images.max() - images.min() + 1e-6)
+        images = images.view(1, 1, 256, 256).expand(-1, 3, -1, -1)         # (D, 3, 256, 256)  ← 必须 3 通道！
+        masks = torch.from_numpy(masks).unsqueeze(0).to(torch.uint8)  # (D, 1, 256, 256)
+        
+        # Text prompt（保持不变）
+        valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
+        is_instance = text_prompt.get('instance_label') == 1
+        
+        all_prompts = []   
+        prompt_class_ids = []  
+        
+        if is_instance:
+                all_prompts.append(text_prompt[str(valid_keys[0])])
+                prompt_class_ids.append(1)
+        else:
+            for cls_id in valid_keys:
+                all_prompts.append(text_prompt[str(cls_id)])
+                prompt_class_ids.append(int(cls_id))
+        return {
+            "image": images,
+            "mask": masks,
+            # 🌟 将列表合并为由特定分隔符连接的字符串
+            "all_prompts": " [SEP] ".join(all_prompts), 
+            # 🌟 将 ID 列表转为 tensor，如果长度不一，这里仍会报错，建议存为字符串
+            "prompt_class_ids": ",".join(map(str, prompt_class_ids)),
+            "pad_info": pad_info,
+            "image_name": pad_info["image_name"]
+        }
+            
 class DynamicPromptAugmentor:
     def __init__(self, concat_prob=0.3, drop_prob=0.1):
         self.concat_prob = concat_prob

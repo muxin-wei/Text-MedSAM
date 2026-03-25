@@ -173,12 +173,6 @@ def run_inference(hparams: argparse.Namespace):
             logits_bn = seg_chunk.view(bs, text_chunk_size, 64, 64)
                 
 
-            # logits_bn_resized = F.interpolate(
-            #     logits_bn, 
-            #     size=(H, W), 
-            #     mode='bilinear', 
-            #     align_corners=False
-            # )
 
             max_vals, max_indices = torch.max(logits_bn, dim=1)
             

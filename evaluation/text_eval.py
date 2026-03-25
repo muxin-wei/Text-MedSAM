@@ -11,12 +11,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
-# Ensure SurfaceDice is accessible
-
 
 try:
-    from src.dataset.utils import process_input
-    from SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient
+    # from src.dataset.utils import process_input
+    from evaluation.SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient
 except ImportError:
     print("Error: SurfaceDice module not found. Please ensure 'SurfaceDice.py' is in the same directory or PYTHONPATH.")
     import sys
@@ -25,8 +23,7 @@ except ImportError:
 join = os.path.join
 
 def compute_multi_class_dsc(gt, seg, label_ids):
-    # Filter only labels present in both the requested IDs and the GT
-    present_labels = set(np.unique(gt)[1:]) & set(label_ids)
+    present_labels = (set(np.unique(gt)) - {0}) & set(label_ids)
     if not present_labels:
         return np.nan
         
@@ -38,7 +35,7 @@ def compute_multi_class_dsc(gt, seg, label_ids):
     return np.nanmean(dsc)
 
 def compute_multi_class_nsd(gt, seg, spacing, label_ids, tolerance=2.0):
-    present_labels = set(np.unique(gt)[1:]) & set(label_ids)
+    present_labels = (set(np.unique(gt)) - {0}) & set(label_ids)
     if not present_labels:
         return np.nan
 
@@ -53,10 +50,9 @@ def compute_multi_class_nsd(gt, seg, spacing, label_ids, tolerance=2.0):
 def _label_overlap(x, y):
     x = x.ravel()
     y = y.ravel()
-    overlap = np.zeros((1+x.max(), 1+y.max()), dtype=np.uint)
-    for i in range(len(x)):
-        overlap[x[i], y[i]] += 1
-    return overlap
+    max_label = max(x.max(), y.max()) + 1
+    overlap = np.bincount(x * max_label + y, minlength=max_label**2).reshape(max_label, max_label)
+    return overlap.astype(np.uint)
 
 def _intersection_over_union(masks_true, masks_pred):
     overlap = _label_overlap(masks_true, masks_pred)
@@ -93,12 +89,11 @@ def eval_tp_fp_fn(masks_true, masks_pred, threshold=0.5):
 def main():
     parser = argparse.ArgumentParser(description='Offline Segmentation Evaluation')
     # Path to the Ground Truth (Images usually reside here or nearby, but we need the .npz structure for metadata)
-    parser.add_argument('-i', '--test_img_path', default='/root/autodl-tmp/dataset/sample/img', type=str, help='Path to original test images (for spacing/metadata)')
-    parser.add_argument('-val_gts', '--validation_gts_path', default='/root/autodl-tmp/dataset/sample/sample_gt', type=str, help='Path to GT .npz files')
+    parser.add_argument('-imgs', '--test_img_path', default='/root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/test/val', type=str, help='Path to original test images (for spacing/metadata)')
+    parser.add_argument('-gts', '--validation_gts_path', default='/root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/3D_val_gt/3D_val_gt_text', type=str, help='Path to GT .npz files')
     # Path to YOUR pre-computed predictions
-    parser.add_argument('-p', '--pred_path', default='/root/autodl-tmp/dataset/sample/seg/epoch=0035-step=042000', type=str, help='Path to your prediction .npz files')
+    parser.add_argument('-s', '--segs', default='/root/autodl-tmp/Text-MedSAM/CVPR-BiomedSegFM/test/seg/k_spatial', type=str, help='Path to your prediction .npz files')
     parser.add_argument('-o', '--save_path', default='./evaluation_results', type=str, help='Path to save CSV results')
-    parser.add_argument('--team_name', default='MyModel', type=str, help='Name to use for the output CSV file')
     
     args = parser.parse_args()
 
@@ -106,7 +101,7 @@ def main():
     validation_gts_path = args.validation_gts_path
     pred_path = args.pred_path
     save_path = args.save_path
-    teamname = args.team_name
+    teamname = os.path.basename(pred_path)
 
     os.makedirs(save_path, exist_ok=True)
     
@@ -153,21 +148,21 @@ def main():
             # GT (Mask)
             gt_data = np.load(gt_file_path, allow_pickle=True)
             if 'gts' in gt_data:
-                gt_npz = gt_data['gts'].astype(np.uint8)
+                gt_npz = gt_data['gts'].astype(np.int32)
             else:
                 # Fallback if keys are different (e.g. if it's just the array)
-                gt_npz = gt_data[list(gt_data.keys())[0]].astype(np.uint8)
+                gt_npz = gt_data[list(gt_data.keys())[0]].astype(np.int32)
 
             # Prediction (Mask)
             pred_data = np.load(pred_file_path, allow_pickle=True)
             # Handle different saving keys in prediction files
             if 'segs' in pred_data:
-                seg_npz = pred_data['segs'].astype(np.uint8)
+                seg_npz = pred_data['segs'].astype(np.int32)
             elif 'arr_0' in pred_data:
-                seg_npz = pred_data['arr_0'].astype(np.uint8)
+                seg_npz = pred_data['arr_0'].astype(np.int32)
             else:
                 # Try to guess or take the first key
-                seg_npz = pred_data[list(pred_data.keys())[0]].astype(np.uint8)
+                seg_npz = pred_data[list(pred_data.keys())[0]].astype(np.int32)
                 
             # Image Metadata
             img_npz = np.load(img_file_path, allow_pickle=True)
@@ -179,8 +174,8 @@ def main():
             instance_label = prompts.get('instance_label', 0)
             class_ids = sorted([int(k) for k in prompts if k != "instance_label"])
             class_ids_array = np.array(class_ids, dtype=np.int32)
-            gt_npz_re,_,_ = process_input(gt_npz,256, mode='nearest')
-            gt_npz = gt_npz_re
+            # gt_npz_re,_,_ = process_input(gt_npz,256, mode='nearest')
+            # gt_npz = gt_npz_re
             if gt_npz.shape != seg_npz.shape:
                 print(f"Shape Mismatch! GT: {gt_npz.shape}, Pred: {seg_npz.shape}")
                 # Optional: resize or skip. For strict eval, we skip or set NaN
@@ -192,6 +187,7 @@ def main():
             dsc_tp = None
 
             if instance_label == 0:  # Semantic Segmentation
+                # continue
                 dsc = compute_multi_class_dsc(gt_npz, seg_npz, class_ids_array)
                 nsd = compute_multi_class_nsd(gt_npz, seg_npz, spacing, class_ids_array)
                 f1_score = np.nan
@@ -201,28 +197,36 @@ def main():
                 # Check if we need to convert binary mask to instance mask
                 if len(np.unique(seg_npz)) <= 2 and np.max(seg_npz) == 1:
                     # convert prediction masks from binary to instance
-                    tumor_inst, _ = cc3d.connected_components(seg_npz, connectivity=6, return_N=True)
-                    seg_npz = tumor_inst.astype(np.uint8)
+                    seg_binary = (seg_npz > 0).astype(np.uint8)  # 彻底清理噪声/概率值
+                    tumor_inst, n_comp = cc3d.connected_components(seg_binary, connectivity=6, return_N=True)
+                    seg_npz = tumor_inst.astype(np.int32)
                 
                 # Relabel sequentially to ensure contiguous IDs for linear_sum_assignment
                 gt_npz, _, _ = segmentation.relabel_sequential(gt_npz)
+                seg_npz, _, _ = segmentation.relabel_sequential(seg_npz)
+                
                 # F1 / Precision / Recall
                 tp, fp, fn, matched_pairs = eval_tp_fp_fn(gt_npz, seg_npz)
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-                f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-
-                # DSC for True Positives
-                if matched_pairs:
-                    dsc_list = []
-                    for gt_idx, pred_idx in matched_pairs:
-                        gt_mask = gt_npz == (gt_idx + 1)
-                        pred_mask = seg_npz == (pred_idx + 1)
-                        dsc_value = compute_dice_coefficient(gt_mask, pred_mask)
-                        dsc_list.append(dsc_value)
-                    dsc_tp = np.mean(dsc_list)
+                
+                if tp == 0 and fp == 0 and fn == 0:
+                    f1_score = 1.0
+                    dsc_tp = np.nan # 既然没有 TP，计算 TP 的平均 Dice 也没有意义，赋为 NaN
                 else:
-                    dsc_tp = 0.0
+                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+                    
+                    # DSC for True Positives（官方 DSC_TP）
+                    if matched_pairs:
+                        dsc_list = []
+                        for gt_idx, pred_idx in matched_pairs:
+                            gt_mask = gt_npz == (gt_idx + 1)
+                            pred_mask = seg_npz == (pred_idx + 1)
+                            dsc_value = compute_dice_coefficient(gt_mask, pred_mask)
+                            dsc_list.append(dsc_value)
+                        dsc_tp = np.mean(dsc_list)
+                    else:
+                        dsc_tp = 0.0
                 
                 dsc = np.nan
                 nsd = np.nan
@@ -234,7 +238,9 @@ def main():
             metric['F1'].append(round(f1_score, 4) if f1_score is not None and not np.isnan(f1_score) else np.nan)
             metric['DSC_TP'].append(round(dsc_tp, 4) if dsc_tp is not None and not np.isnan(dsc_tp) else np.nan)
 
-            print(f"Done. DSC={metric['DSC'][-1]}, NSD={metric['NSD'][-1]}, F1={metric['F1'][-1]}")
+            print(f"Done. " + 
+                  (f"DSC={metric['DSC'][-1]}, NSD={metric['NSD'][-1]}, F1=nan" if instance_label == 0 
+                   else f"DSC=nan, NSD=nan, F1={metric['F1'][-1]}, DSC_TP={metric['DSC_TP'][-1]}"))
 
         except Exception as e:
             print(f"ERROR: {e}")
@@ -257,6 +263,7 @@ def main():
     print(f"Mean DSC: {metric_df['DSC'].mean():.4f}")
     print(f"Mean NSD: {metric_df['NSD'].mean():.4f}")
     print(f"Mean F1:  {metric_df['F1'].mean():.4f}")
+    print(f"Mean DSC_TP:  {metric_df['DSC_TP'].mean():.4f}")
 
     if missing_files:
         error_log_path = join(save_path, f'{teamname}_errors.txt')
