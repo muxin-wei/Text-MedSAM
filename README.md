@@ -10,59 +10,36 @@ Text-MedSAM extends the Segment Anything Model (SAM) for medical imaging by inco
 - **Medical Text Encoding**: PubMedBERT for domain-specific biomedical text understanding
 - **Adaptive Text-Image Fusion**: Token shuffling and channel unshuffling for seamless modality integration
 - **Multi-Modal Attention**: Cross-modal attention mechanisms for text-guided segmentation
-- **Distributed Training**: DDP support for efficient large-scale model training
+
 
 ### Key Features
 
 - ✅ Text-guided segmentation of medical images (CT, MRI, PET, etc.)
-- ✅ Support for both 2D and 3D medical imaging data
 - ✅ Distributed Data Parallel (DDP) training on multi-GPU systems
-- ✅ Knowledge distillation from teacher models
 - ✅ Efficient inference with optimized model architecture
-- ✅ Comprehensive data preprocessing utilities
-- ✅ Medical-domain text embeddings with PubMedBERT
 
 ---
 
-## System Requirements
+## Visualization
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/segs_clip_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/segs_clip.png">
+  <img src="assets/segs_clip.png" alt="Segmentation Visualization" style="max-width: 100%;">
+</picture>
+<p align="center" style="color: #333333; font-size: 14px;">
+  Visualization of segmentation and attention map of the last layer, where green overlays represent the ground truth mask, yellow indicates the predicted segmentation, and red/heat intensity highlights the model's focus area.
+</p>
 
-```
-OS: Ubuntu 20.04+
-Python: 3.9+
-CUDA: 12.2+
-PyTorch: 2.0+
-GPU Memory: 8GB minimum (for inference), 24GB+ recommended (for training)
-```
+<br><hr><br>
 
-## Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/muxin-wei/Text-MedSAM.git
-   cd Text-MedSAM
-   ```
-
-2. **Install dependencies**
-   ```bash
-   pip install -e .
-   ```
-
-3. **Download Pre-trained Models**
-   ```bash
-   mkdir -p ckpts
-   # Download PubMedBERT and place in ckpts/
-   ```
-
-4. **Docker Setup** (Optional)
-   ```bash
-   docker build -t text-medsam .
-   docker run -it --gpus all -v /path/to/data:/inputs -v /path/to/outputs:/outputs text-medsam
-   ```
-
----
+<picture>
+  <img src="assets/attn.png" alt="Attention Map" style="background-color: #ffffff; padding: 10px; max-width: 100%;">
+</picture>
+<p align="center" style="color: #333333; font-size: 14px;">
+  Visualization of intermediate feature maps and final segmentation results, illustrating how the model progressively suppresses background noise and focuses on the target anatomical structures.
+</p>
 
 ## Repository Structure
-
 ```
 Text-MedSAM/
 ├── src/
@@ -93,140 +70,30 @@ Text-MedSAM/
 │   └── npz_to_npy.py            # Data format conversion
 ├── ckpts/                         # Model checkpoints
 ├── main.py                        # Lightning training framework
-├── train_one_gpu.py              # Single GPU training
-├── sample_embedding.py            # DDP embedding computation
 └── requirements.txt              # Dependencies
 ```
 
 ---
 
 ## Model Architecture
-
-### System Overview
-
-```
-Medical Image + Text Prompt
-    ↓
-┌─────────────────────────────────────────┐
-│     MULTI-MODAL ENCODING STAGE          │
-├─────────────────────────────────────────┤
-│  Image Encoder (RepViT)                 │
-│  - Input: 256×256 RGB image             │
-│  - Output: 64×64×256 feature map        │
-│                  ↓                      │
-│  Text Encoder (PubMedBERT)              │
-│  - Input: Medical text prompt           │
-│  - Output: 1×1024 embedding             │
-└─────────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────────┐
-│   TEXT-IMAGE FUSION & ATTENTION STAGE   │
-│      (ShuffleFormer Architecture)       │
-├─────────────────────────────────────────┤
-│  Token Shuffling                        │
-│  - Spatial rearrangement of tokens      │
-│  - Channel dimension reduction          │
-│  - Enables local token interaction      │
-│                  ↓                      │
-│  Transformer Blocks with Fusion         │
-│  - Self-attention on shuffled tokens    │
-│  - Cross-modal text-image attention     │
-│  - Multi-head attention (8 heads)       │
-│  - LayerNorm + MLP blocks               │
-│                  ↓                      │
-│  Channel Unshuffling                    │
-│  - Restore spatial organization         │
-│  - Channel expansion                    │
-│  - Reconstruct feature map              │
-└─────────────────────────────────────────┘
-    ↓
-┌─────────────────────────────────────────┐
-│    ATTENTION GATE & DECODING STAGE      │
-├─────────────────────────────────────────┤
-│  Attention Gate (AttenGate)             │
-│  - Gated attention mechanism            │
-│  - Fuses image features and             │
-│    text-guided attention maps           │
-│  - Output: Attentive feature fusion     │
-│                  ↓                      │
-│  Atrous Separable Convolution           │
-│  - Dilated convolution (kernel=3,       │
-│    dilation=2, padding=2)               │
-│  - Multi-scale receptive field          │
-│  - BatchNorm + GELU activation          │
-└─────────────────────────────────────────┘
-    ↓
-Segmentation Mask (256×256)
-```
-
----
-
 ## Component Details
 
 ### 1. **Image Encoder: RepViT**
-
-**Purpose**: Extract multi-scale visual features from medical images
-
-**Architecture**:
-- **Input**: 256×256 medical image
-- **Type**: Efficient Vision Transformer (lightweight alternative to ViT)
+- **Input**: 256×256
 - **Output**: 64×64×256 feature map (16× downsampling)
 - **Efficiency**:
   - Parameters: ~6M (comparable to TinyViT)
-  - Inference Latency: 0.36s per 512×512 image
-  - Designed for resource-constrained medical imaging environments
-
-**Key Advantages**:
-- Optimized for real-time inference
-- Maintains spatial information through patch embeddings
-- Learns both local and global visual context
-- Suitable for portable medical imaging devices
+  - Inference Latency: 0.36s per 256×256 image
 
 ---
 
 ### 2. **Text Encoder: PubMedBERT**
-
-**Purpose**: Convert medical text prompts into semantic embeddings
-
-**Architecture Details**:
-- **Model**: BERT variant pre-trained on 4.5B+ PubMed tokens
 - **Vocabulary**: Medical and biomedical terminology
 - **Configuration**:
   - Hidden Dimension: 768
   - Number of Layers: 12
   - Attention Heads: 12
   - Output Projection: 1024 (after final linear layer)
-
-**Text Processing Pipeline**:
-```
-Raw Text Input (e.g., "left kidney")
-    ↓
-Tokenization (max 256 tokens)
-    ↓
-PubMedBERT Encoding (768-dim)
-    ↓
-Linear Projection (768 → 1024)
-    ↓
-Text Embedding (1×1024)
-```
-
-**Medical Domain Knowledge**:
-- Trained on biomedical abstracts and literature
-- Better understanding of anatomical terms (kidney, liver, etc.)
-- Captures pathological context (lesion, tumor, etc.)
-- Outperforms general-purpose BERT on medical tasks
-
-**Text Prompt Format**:
-```json
-{
-  "CT_Abd": {
-    "1": ["kidney", "left kidney", "renal cortex"],
-    "2": ["liver", "hepatic parenchyma"],
-    "3": ["spleen"],
-    "instance_label": 0
-  }
-}
-```
 
 ---
 
@@ -236,7 +103,7 @@ Text Embedding (1×1024)
 
 **Architecture Overview**:
 
-The ShuffleFormer implements a sophisticated fusion strategy combining token shuffling, cross-modal attention, and learnable fusion:
+The ShuffleFormer implements a fusion strategy combining token shuffling, cross-modal attention, and learnable fusion:
 
 #### **A. Token Shuffling (TokenShuffle)**
 
@@ -431,208 +298,83 @@ Output: Refined Features (B × 256 × 64 × 64)
 
 ---
 
-## Detailed Encoding Pipeline
 
-### Stage 1: Visual Encoding
+## Getting started
 
-```python
-# Input: Medical image (B × 3 × 256 × 256)
-image → RepViT encoder
-  ├─ Patch embedding: 256 → 16 patches per side (4×4 per patch)
-  ├─ Patch features: 16 × 16 = 256 spatial locations
-  ├─ 8 Vision Transformer blocks
-  │  └─ Each: Self-attention + MLP with residuals
-  └─ Output: (B × 256 × 64 × 64) feature map
-```
+### Installation
 
-### Stage 2: Text Encoding
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/muxin-wei/Text-MedSAM.git
+   cd Text-MedSAM
+   ```
 
-```python
-# Input: Text prompt (e.g., "left kidney")
-text → Tokenization (max 256 tokens)
-  → PubMedBERT (12 layers)
-    ├─ Embedding layer: token → 768-dim
-    ├─ 12 transformer blocks
-    │  └─ Multi-head self-attention (12 heads)
-    ├─ [CLS] token extraction
-    └─ Linear projection: 768 → 1024
-  → Output: (B × 1 × 1024) text embedding
-```
+2. **Install dependencies**
+   ```bash
+   pip install uv
+   uv venv
+   uv sync
+   source .venv/bin/activate
+   ```
 
----
+3. **Download Pre-trained Models**
+   ```bash
+   mkdir -p ckpts
+   # Download PubMedBERT and Rep-ViT place in ckpts/
+   ```
 
-## Detailed Decoding Pipeline
 
-### Stage 1: ShuffleFormer Fusion
+### Data Preparation
+1. Download dataset from [CVPR-BiomedSegFM Challenge](https://huggingface.co/datasets/junma/CVPR-BiomedSegFM/). 
+   
+   Multi-thread downloading with `aria2c` is highly recommended.
+    
+   ```bash
+   sudo apt-get install aria2 # installl aria2c
+   aria2c \
+    --continue=true \
+    --max-concurrent-downloads=8 \
+    --max-connection-per-server=16 \
+    --split=16 \
+    --max-tries=5 \
+    --retry-wait=3 \
+    --header="Authorization: Bearer hf_YOUR_TOKEN" \
+   ```
 
-```python
-# Input: Visual (B × 64 × 64 × 256), Text (B × 1 × 1024)
-x = rearrange(visual, "b c h w → b (h w) c")  # Flatten to (B × 4096 × 256)
+    To get the file list as a txt, you will need to use hf API to get access to the dataset repo.
 
-# Token Shuffling
-x = shuffle(x)  # (B × 1024 × 256) - reduced spatial, grouped tokens
+   ```python
+    from huggingface_hub import list_files_to_download
+    import json
 
-# Multi-head Transformer with Text Guidance
-for layer in transformer_blocks:
-    x = concat(text, x)  # (B × 1025 × 256)
-    x = LayerNorm(x)
-    x = x + MultiHeadAttention(x)  # Text-guided attention
-    text_token = x[0]  # Extract updated text
-    x = x[1:]  # Remove text
-    text = α * text + (1 - α) * text_token  # EMA update
-    x = LayerNorm(x)
-    x = x + MLP(x)
+    #list out all the files
+    repo_id = "junma/CVPR-BiomedSegFM"
+    files = list_files_to_download(repo_id=repo_id, repo_type="dataset")
+    with open("urls.txt", "w") as f:
+        for file_path in files:
+            url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{file_path}"
+            f.write(url + "\n")
+            dir_path = os.path.dirname(file_path)
+            file_name = os.path.basename(file_path)
+            output_line = f"{url}\n"
+            output_line += f"  out={file_name}\n"
+            output_line += f"  dir=CVPR-BiomedSegFM/{dir_path}\n"
+            f.write(output_line)
+    print("done")
+    ```
 
-# Channel Unshuffling
-x = unshuffle(x)  # (B × 4096 × 64) → (B × 64 × 64 × 64)
-x = rearrange(x, "b (h w) c → b c h w")
-```
-
-### Stage 2: Attention Gating
-
-```python
-# Input: Image features x (B × 448 × 64 × 64), Text-guided g (B × 64 × 64 × 64)
-x_proj = Conv2d(448 → 256)(x)
-g_proj = Conv2d(64 → 256)(g)
-attn = Sigmoid(Conv2d(256 → 1)(GELU(x_proj + g_proj)))  # (B × 1 × 64 × 64)
-output = concat(attn * x, g)  # (B × 512 × 64 × 64)
-```
-
-### Stage 3: Decoder Convolution
-
-```python
-# Input: Fused features (B × 512 × 64 × 64)
-output = BatchNorm(Conv2d_Atrous(512 → 256, kernel=3, dilation=2))
-output = GELU(output)  # (B × 256 × 64 × 64)
-
-# Segmentation head (not shown here)
-logits = Conv2d(256 → num_classes)(output)  # (B × num_classes × 256 × 256)
-```
-
----
-
-## Training Configuration
-
-### Default Configuration (`configs/text_seg_repvit.yaml`)
-
-```yaml
-model:
-  target: training.train_textsam.TextSAM
-  base_learning_rate: 4.5e-5
-  
-  image_encoder:
-    target: src.models.visual.image_encoder.repvit_m1_0
-  
-  text_embedder_configs:
-    version: ckpts/bert
-    max_length: 256
-    d_model: 768
-    output_dim: 1024
-    local_pt: ckpts/pubmedbert.pt
-  
-  maskformer_config:
-    img_size: 64
-    patch_size: 4
-    embed_dim: 256
-    depth: 2
-    num_heads: 8
-    mlp_ratio: 0.5
-    n_mlp_blocks: 2
-
-data:
-  batch_size: 5
-  num_workers: 8
-  train:
-    data_dir: /path/to/train_npy
-    text_label_path: /path/to/text_seg_class.json
-    image_size: 256
-    n_slicing: 9
-
-lightning:
-  trainer:
-    max_epochs: 100
-    accelerator: gpu
-```
-
----
-
-## Usage Guide
-
-### 1. Data Preparation
-
-**Convert NPZ to NPY:**
+2. **Preprocessing**
+    ```bash
+        python scripts/preprocess.py
+    ```
+   
+4. **Training**
 ```bash
-python utils/npz_to_npy.py \
-    -npz_dir data/npz/CT_Abd \
-    -npy_dir data/npy \
-    -num_workers 4
+python main.py \ # default with DDP
+    -b configs/text_seg_repvit.yaml \ # config
+    -p Text-MedSAM \ # project name for wandb
+    -s 42 
 ```
-
-**Expected data structure:**
-```
-data/npy/
-├── imgs/          # Normalized images [0, 1]
-│   ├── case_001-000.npy
-│   └── ...
-├── gts/           # Ground truth masks
-│   ├── case_001-000.npy
-│   └── ...
-└── embeddings/    # (Optional) Pre-computed embeddings
-    └── ...
-```
-
-### 2. Training
-
-**Default configuration:**
-```bash
-python main.py \
-    -t True \
-    -b configs/text_seg_repvit.yaml \
-    -p Text-MedSAM \
-    -s 42
-```
-
-**Single GPU training:**
-```bash
-python train_one_gpu.py \
-    -data_root /path/to/train_npy \
-    -pretrained_checkpoint ckpts/rep_medsam.pth \
-    -num_epochs 100 \
-    -batch_size 16 \
-    -lr 4.5e-5
-```
-
-**With knowledge distillation:**
-```bash
-bash scripts/embeddings.sh
-
-python train_one_gpu.py \
-    -data_root /path/to/train_npy \
-    -embedding_path /path/to/embeddings \
-    -distillation True
-```
-
-### 3. Inference
-
-**Batch inference:**
-```bash
-python scripts/batch_infer_text.py \
-    --checkpoint_path ckpts/model.ckpt \
-    --img_dir /path/to/images \
-    --gt_dir /path/to/ground_truth \
-    --output_dir /path/to/outputs
-```
-
-### 4. Multi-GPU Training (DDP)
-
-```bash
-python main.py \
-    -t True \
-    -b configs/text_seg_repvit.yaml \
-    -p Text-MedSAM \
-    -s 42
-```
-
 ---
 
 ## Key Technical Innovations
@@ -652,57 +394,4 @@ python main.py \
 - Atrous separable convolutions: Multi-scale features without pooling
 - Efficient memory utilization for real-time inference
 
-### 4. **Medical Domain Optimization**
-- PubMedBERT: Pre-trained on 4.5B+ biomedical tokens
-- Anatomical text prompts for precise region specification
-- Knowledge distillation from teacher models for improved accuracy
-
 ---
-
-## Performance Benchmarks
-
-### Efficiency on 3D Volumes
-
-| Case | Volume Size | Inference Time |
-|------|------------|-----------------|
-| CT_0566 | 287×512×512 | 73.64s |
-| CT_0888 | 237×512×512 | 25.09s |
-| MR_0121 | 64×290×320 | 16.16s |
-
-**~2-3× speedup** achieved with optimized inference pipeline
-
----
-
-## Citation
-
-If you use Text-MedSAM in your research, please cite:
-
-```bibtex
-@misc{textmedsam,
-  title={Text-MedSAM: Medical Image Segmentation Guided by Text Prompts},
-  author={Wei, Muxin},
-  year={2025},
-  publisher={GitHub},
-  howpublished={\url{https://github.com/muxin-wei/Text-MedSAM}}
-}
-```
-
----
-
-## License
-
-[Add your license information here]
-
----
-
-## Contributing
-
-Contributions are welcome! Please open issues or pull requests for bug reports, feature requests, or improvements.
-
----
-
-## Acknowledgments
-
-- RepViT architecture from [ADD SOURCE]
-- PubMedBERT from Microsoft Research
-- MedSAM framework inspiration
