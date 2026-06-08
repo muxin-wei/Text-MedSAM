@@ -22,8 +22,6 @@ Text-MedSAM extends the Segment Anything Model (SAM) for medical imaging by inco
 
 ## Visualization
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/segs_clip_dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/segs_clip.png">
   <img src="assets/segs_clip.png" alt="Segmentation Visualization" style="max-width: 100%;">
 </picture>
 <p align="center" style="color: #333333; font-size: 14px;">
