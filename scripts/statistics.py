@@ -33,9 +33,6 @@ def analyze_non_empty_slices(data_dir: str, output_json: str):
                 continue
                 
             D, H, W = gts.shape
-            
-            # np.any is faster and safer than np.sum for checking non-zero pixels
-            # axis=(1, 2) checks across H and W for each slice D
             non_empty_mask = np.any(gts != 0, axis=(1, 2))
             
             # Convert boolean mask to list of indices

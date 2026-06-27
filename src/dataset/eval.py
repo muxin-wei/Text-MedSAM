@@ -2,11 +2,9 @@ import torch
 import numpy as np
 import cc3d
 from torchmetrics import Metric
-from evaluation.SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient
+from evaluation.SurfaceDice import compute_dice_coefficient
 from skimage import segmentation
-from scipy.ndimage import distance_transform_edt, binary_closing, generate_binary_structure
 from scipy.optimize import linear_sum_assignment
-from torchmetrics.functional.segmentation import dice_score
 
 class SegEval(Metric):
     def __init__(

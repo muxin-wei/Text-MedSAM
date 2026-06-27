@@ -105,8 +105,6 @@ def main():
 
     os.makedirs(save_path, exist_ok=True)
     
-    # We assume we iterate over the GT folder or Image folder to ensure we cover the test set
-    # Using test_img_path to get the list of cases to evaluate
     test_cases = sorted([f for f in os.listdir(test_img_path) if f.endswith('.npz')])
 
     print(f"Found {len(test_cases)} cases to evaluate.")
@@ -197,7 +195,7 @@ def main():
                 # Check if we need to convert binary mask to instance mask
                 if len(np.unique(seg_npz)) <= 2 and np.max(seg_npz) == 1:
                     # convert prediction masks from binary to instance
-                    seg_binary = (seg_npz > 0).astype(np.uint8)  # 彻底清理噪声/概率值
+                    seg_binary = (seg_npz > 0).astype(np.uint8)
                     tumor_inst, n_comp = cc3d.connected_components(seg_binary, connectivity=6, return_N=True)
                     seg_npz = tumor_inst.astype(np.int32)
                 
@@ -210,13 +208,13 @@ def main():
                 
                 if tp == 0 and fp == 0 and fn == 0:
                     f1_score = 1.0
-                    dsc_tp = np.nan # 既然没有 TP，计算 TP 的平均 Dice 也没有意义，赋为 NaN
+                    dsc_tp = np.nan
                 else:
                     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
                     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
                     f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
                     
-                    # DSC for True Positives（官方 DSC_TP）
+                    # DSC for True Positives
                     if matched_pairs:
                         dsc_list = []
                         for gt_idx, pred_idx in matched_pairs:
@@ -238,7 +236,7 @@ def main():
             metric['F1'].append(round(f1_score, 4) if f1_score is not None and not np.isnan(f1_score) else np.nan)
             metric['DSC_TP'].append(round(dsc_tp, 4) if dsc_tp is not None and not np.isnan(dsc_tp) else np.nan)
 
-            print(f"Done. " + 
+            print("Done. " + 
                   (f"DSC={metric['DSC'][-1]}, NSD={metric['NSD'][-1]}, F1=nan" if instance_label == 0 
                    else f"DSC=nan, NSD=nan, F1={metric['F1'][-1]}, DSC_TP={metric['DSC_TP'][-1]}"))
 

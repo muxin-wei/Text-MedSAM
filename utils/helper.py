@@ -1,5 +1,4 @@
 import os
-import lightning.pytorch as pl
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch import loggers as pl_loggers
 from lightning.pytorch.utilities import rank_zero_only
@@ -10,7 +9,6 @@ import torch
 import collections
 from itertools import repeat
 from omegaconf import OmegaConf
-import os.path as osp
 from torchvision.utils import make_grid
 from typing import Tuple
 import importlib
@@ -356,4 +354,5 @@ to_1tuple = _ntuple(1)
 to_2tuple = _ntuple(2)
 to_3tuple = _ntuple(3)
 to_4tuple = _ntuple(4)
-to_ntuple = lambda n, x: _ntuple(n)(x)
+def to_ntuple(n, x):
+    return _ntuple(n)(x)

@@ -4,10 +4,8 @@ import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from typing import List, Dict, Any, Tuple
 from lightning.fabric import Fabric
 import numpy as np
-from matplotlib import pyplot as plt
 # Add project root to path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -15,21 +13,21 @@ sys.path.append(project_root)
 
 try:
     from training.train_text_seg import TextSAM
-    from dataset.textseg import ValTextSeg, process_output
+    from dataset.textseg import ValTextSeg
 except ImportError as e:
     print(f"Error importing model/dataset classes: {e}")
     sys.exit(1)
     
 def restore_prediction_size(pred_seg, gt_shape):
     """
-    将预测的分割结果上采样到 GT 的尺寸。
+    upsampling the shape of pred_seg to gt_shape
     
     Args:
-        pred_seg (torch.Tensor): 预测结果，形状 (D_small, H_small, W_small) 或 (B, C, D, H, W)
-        gt_shape (tuple): 真实 Mask 的形状 (D, H, W)
+        pred_seg (torch.Tensor): (D_small, H_small, W_small) or (B, C, D, H, W)
+        gt_shape (tuple): (D, H, W)
     """
     if pred_seg.dim() == 3:
-        input_tensor = pred_seg.unsqueeze(0).unsqueeze(0).float() # 插值需要 float 类型
+        input_tensor = pred_seg.unsqueeze(0).unsqueeze(0).float() # interpolation with float
     else:
         input_tensor = pred_seg.float()
 
@@ -114,11 +112,13 @@ def run_inference(hparams: argparse.Namespace):
     with torch.no_grad():
         keys = sorted(list(prompt_dict.keys())) 
         for k in keys:
-            if k == "instance_label": continue
+            if k == "instance_label":
+                continue
             
             text_val = prompt_dict[k]
             text = text_val[0] if isinstance(text_val, (list, tuple)) else text_val
-            if isinstance(text, (list, tuple)): text = text[0]
+            if isinstance(text, (list, tuple)):
+                text = text[0]
             
             text_embed = model.text_embedder(text)
             if len(text_embed.shape) > 2:
@@ -137,15 +137,14 @@ def run_inference(hparams: argparse.Namespace):
         image_pe = model.prompt_encoder.get_dense_pe()
         
         image_embeddings = []
-        img_chunk_size = 20 # <--- [关键] 请根据显存调整这个值！
+        img_chunk_size = 20 
         for start_idx in range(0, D, img_chunk_size):
             end_idx = min(start_idx + img_chunk_size, D)
-            current_bs = end_idx - start_idx
             
             # (B, 3, H, W)
             img_chunk = input_images[start_idx:end_idx] 
             
-            # 1. Image Encoder (B, C, h, w)
+            # image embedding (B, C, h, w)
             image_embeddings_chunk = model.image_encoder(img_chunk)
             image_embeddings.append(image_embeddings_chunk)
         image_embeddings = torch.cat(image_embeddings, dim=0) #NB, C, H, W
@@ -176,22 +175,16 @@ def run_inference(hparams: argparse.Namespace):
 
             max_vals, max_indices = torch.max(logits_bn, dim=1)
             
-            # 4. 阈值过滤
-            # 只有最高分 > 0 (即 prob > 0.5) 才算前景，否则是背景 (0)
-            foreground_mask = max_vals > 0.0 # Logits > 0 等价于 Sigmoid > 0.5
+            # threasholding prob > 0.5
+            foreground_mask = max_vals > 0.0 # Logits > 0
             
-            # 5. 映射回真实的 Class ID
-            # 比如 max_indices 是 0, 对应的真实 ID 是 1 (Liver)
+            # mapping to real class ID
             pred_labels = class_map[max_indices] # (B, H, W)
             
-            # 6. 应用背景掩膜
-            # 如果没过阈值，置为 0 (背景)
+            # applying bg mask
             final_pred_chunk = pred_labels * foreground_mask.long()
-            
-            # 7. 填入最终大数组
             final_seg[start_idx:end_idx] = final_pred_chunk.cpu().numpy().astype(np.uint8)
             
-            # 可选：如果你还需要保存 max_scores 用于调试
             max_scores[start_idx:end_idx] = max_vals.cpu().numpy()
                             
         padded_size = padded_size.item()

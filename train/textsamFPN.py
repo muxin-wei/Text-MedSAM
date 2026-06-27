@@ -1,10 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import lightning.pytorch as pl
 from utils.helper import instantiate_from_config
-from itertools import chain
-from transformers import BertConfig, BertModel, BertTokenizer
+from transformers import BertModel, BertTokenizer
 
 class TextEmbeddingBank(nn.Module):
     def __init__(self, pt_path, out_dim: int=256):
@@ -138,7 +136,6 @@ class TextSAM(pl.LightningModule):
         all_prompts_raw = batch["all_prompts"] 
         all_prompts = [p.split(" [SEP] ") for p in all_prompts_raw]
         
-        # 🌟 Reversing Class IDs: String -> List of Lists of Ints
         ids_raw = batch["prompt_class_ids"]
         prompt_class_ids = [[int(i) for i in ids.split(",") if i] for ids in ids_raw]
         
@@ -188,45 +185,44 @@ class TextSAM(pl.LightningModule):
             self.log(f"{k}", v, sync_dist=True)
         return total_loss
     
-    # @torch.no_grad()
-    # def validation_step(self, batch, batch_idx):
-    #     images, gt_masks, prompt_class_ids, all_prompts, pad_info = self.get_val_input(batch)
-    #     img_embed, feats = self.encode_image(images.squeeze(1))
-    #     flattened_prompts = [p for sublist in all_prompts for p in sublist]
-    #     text_embeddings = self.text_embedder(text=flattened_prompts, ds_ids=None, c_ids=None, mode="val")
-    #     if text_embeddings.ndim == 3:
-    #         text_embeddings = text_embeddings[:, 0, :]
-    #     text_embeddings = text_embeddings.unsqueeze(1)  # (K, 1, d)
+    def validation_step(self, batch, batch_idx):
+        images, gt_masks, prompt_class_ids, all_prompts, pad_info = self.get_val_input(batch)
+        img_embed, feats = self.encode_image(images.squeeze(1))
+        flattened_prompts = [p for sublist in all_prompts for p in sublist]
+        text_embeddings = self.text_embedder(text=flattened_prompts, ds_ids=None, c_ids=None, mode="val")
+        if text_embeddings.ndim == 3:
+            text_embeddings = text_embeddings[:, 0, :]
+        text_embeddings = text_embeddings.unsqueeze(1)  # (K, 1, d)
         
-    #     feats = feats[-2::-1]
-    #     self.print(text_embeddings.shape, img_embed.shape)
-    #     output, text, attn_weights = self.mask_former(img_embed, text_embeddings, feats)
-    #     logits = self.mask_decoder(output, text)   # (K, 1, H, W)
+        feats = feats[-2::-1]
+        self.print(text_embeddings.shape, img_embed.shape)
+        output, text, attn_weights = self.mask_former(img_embed, text_embeddings, feats)
+        logits = self.mask_decoder(output, text)   # (K, 1, H, W)
         
-    #     pred_masks = (torch.sigmoid(logits) > 0.5).float()  # (K, 1, H, W)
-    #     total_val_dice = 0.0
+        pred_masks = (torch.sigmoid(logits) > 0.5).float()  # (K, 1, H, W)
+        total_val_dice = 0.0
         
-    #     num_prompts = len(flattened_prompts)
-    #     for i in range(num_prompts):
-    #         pred_i = pred_masks[i]
+        num_prompts = len(flattened_prompts)
+        for i in range(num_prompts):
+            pred_i = pred_masks[i]
             
-    #         target_class = prompt_class_ids[i]
-    #         gt_i = (gt_masks == target_class).float()
-    #         inter = (pred_i * gt_i).sum()
-    #         union = pred_i.sum() + gt_i.sum()
-    #         dice = (2.0 * inter + 1e-5) / (union + 1e-5)
-    #         total_val_dice += dice
-    #     avg_dice = total_val_dice / num_prompts
-    #     total_loss, log_dict = self.loss_fn(logits, gt_masks, batch_idx, 
-    #                                         text_embed=text, img_feat=output, split='val')
+            target_class = prompt_class_ids[i]
+            gt_i = (gt_masks == target_class).float()
+            inter = (pred_i * gt_i).sum()
+            union = pred_i.sum() + gt_i.sum()
+            dice = (2.0 * inter + 1e-5) / (union + 1e-5)
+            total_val_dice += dice
+        avg_dice = total_val_dice / num_prompts
+        total_loss, log_dict = self.loss_fn(logits, gt_masks, batch_idx, 
+                                            text_embed=text, img_feat=output, split='val')
         
-    #     self.log("val/loss", total_loss, prog_bar=True, sync_dist=True)
-    #     self.log("val/dice_score", avg_dice, prog_bar=True, sync_dist=True) 
+        self.log("val/loss", total_loss, prog_bar=True, sync_dist=True)
+        self.log("val/dice_score", avg_dice, prog_bar=True, sync_dist=True) 
         
-    #     for k, v in log_dict.items():
-    #         self.log(f"val/{k}", v, sync_dist=True)
+        for k, v in log_dict.items():
+            self.log(f"val/{k}", v, sync_dist=True)
         
-    #     return
+        return
     
     def configure_optimizers(self):
         lr = 1e-4

@@ -9,8 +9,8 @@ import torch
 from torch import Tensor, nn
 import math
 from typing import Tuple, Type
-from src.models.modules import MLPBlock, PatchEmbed
-from timm.models.layers import DropPath, to_2tuple
+from src.models.modules import MLPBlock
+from timm.models.layers import DropPath
 
 class TwoWayTransformer(nn.Module):
     def __init__(
@@ -308,34 +308,6 @@ class Layer_scale_init_Block(nn.Module):
         x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
         return x
 
-class RoPEAttention(Attention):
-    """Multi-head Attention block with rotary position embeddings."""
-    def forward(self, x, freqs_cis):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        
-        q[:, :, 1:], k[:, :, 1:] = apply_rotary_emb(q[:, :, 1:], k[:, :, 1:], freqs_cis=freqs_cis)
-        attn = (q * self.scale) @ k.transpose(-2, -1)
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        
-        return x
 
 
-class RoPE_Layer_scale_init_Block(Layer_scale_init_Block):
-    # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-    # with slight modifications
-    def __init__(self, *args, **kwargs):
-        kwargs["Attention_block"] = RoPEAttention
-        super().__init__(*args, **kwargs)
 
-    def forward(self, x, freqs_cis):
-        x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x), freqs_cis=freqs_cis))
-        x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
-        
-        return x

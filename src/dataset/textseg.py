@@ -8,7 +8,6 @@ import torch
 from torch.utils.data import Dataset
 import cv2
 from .utils import pad_image_3d, resize_longest_side_3d, resize_longest_side_2d, pad_image_2d
-import bisect
 
 class SliceTextSeg(Dataset):
     def __init__(self, data_dir, gts_dir, text_embed, meta_json):
@@ -158,72 +157,18 @@ class TextSeg(Dataset):
             "img_name": osp.basename(file_path).split('.npz')[0]
         }
 
-class TextSegRandomSlice(Dataset):
-    def __init__(self, txt_path, meta_json, image_size=256, max_instances=5):
-        self.image_size = image_size
-        self.max_instances = max_instances
-        with open(txt_path, 'r') as f:
-            self.npz_paths = [line.strip() for line in f if line.strip()]
-        with open(meta_json, 'r') as f:
-            self.slice_info = json.load(f)
-        self.global_index = []
-        for fname in self.npz_paths:
-            if fname not in self.slice_info:
-                print(f"{fname} not found in json, skipping.")
-                continue
-            valid_slcies = self.slice_info[fname]["non_empty_slices"]
-            for idx in valid_slcies:
-                self.global_index.append((fname, idx))
-            
-    def __len__(self):
-        return len(self.npz_paths)
-
-    def __getitem__(self, idx):
-        file_path = self.npz_paths[idx]
-        filename = osp.basename(file_path)
-        dataset_name = osp.basename(osp.dirname(file_path))
-        
-        if filename not in self.slice_info:
-            return self.__getitem__(random.randint(0, len(self)-1))
-
-        valid_slices = self.slice_info[filename].get('non_empty_slices', [])
-        if not valid_slices:
-             return self.__getitem__(random.randint(0, len(self)-1))
-             
-        slice_idx = random.choice(valid_slices)
-        
-        try:
-            data = np.load(file_path, allow_pickle=True)
-            image = data['imgs'][slice_idx]
-            mask = data['gts'][slice_idx]
-            text_prompt = self.text_labels.get(dataset_name, {})
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            return self.__getitem__(random.randint(0, len(self)-1))
-        
-        image = image[np.newaxis, ...]
-        mask = mask[np.newaxis, ...]
-            
-        return {
-            "image": img_tensor,
-            "mask": mask_tensor,
-            "mask_ids": mask_ids,
-            "text": text_prompt_sep,
-            "img_name": f"{filename.split('.npz')[0]}_{slice_idx}"
-        }
 
 class TextSegVal(Dataset):
     def __init__(self, gts_dir, meta_json=None, image_size=256):
         """
-        meta_json: 预生成的切片索引 JSON 路径
+        meta_json: .json file with information of valid slices for images
         """
         self.gts_dir = gts_dir
         self.image_size = image_size
         self.slice_map = []
 
-        # 🌟 优先从 JSON 加载索引，极大提升启动速度
         if meta_json and os.path.exists(meta_json):
-            print(f"正在从缓存加载验证集索引: {meta_json}")
+            print(f"loading from : {meta_json}")
             with open(meta_json, 'r') as f:
                 self.slice_map = json.load(f)
 
@@ -236,9 +181,7 @@ class TextSegVal(Dataset):
         file_path = meta["file_path"]
         s_idx = meta["slice_idx"]
         
-        # 🌟 核心：只加载单张切片，显存占用极低
         img_data = np.load(file_path, allow_pickle=True)
-        # 自动定位对应的 GT 文件
         gt_path = file_path.replace("3D_val_npz", "3D_val_gt/3D_val_gt_text")
         gt_data = np.load(gt_path)
         
@@ -246,14 +189,12 @@ class TextSegVal(Dataset):
         gts = gt_data['gts'][s_idx]     # (H, W)
         h, w = imgs.shape[-2:]
         text_prompt = img_data["text_prompts"].tolist()
-        # resize + pad 使用完全相同的函数（和 train 一致）
         imgs_res = resize_longest_side_2d(imgs, target_length=256, mode=cv2.INTER_CUBIC)
         gts_res  = resize_longest_side_2d(gts,  target_length=256, mode=cv2.INTER_NEAREST)
         
         images = pad_image_2d(imgs_res)   # (D, 256, 256)
         masks  = pad_image_2d(gts_res)    # (D, 256, 256)
         
-        # 保存所有重建信息（保证 100% 完整性）
         pad_info = {
             "original_shape": (h, w),   # (D_orig, H_orig, W_orig)
             "padded_shape": images.shape,       # (D, 256, 256)
@@ -261,13 +202,11 @@ class TextSegVal(Dataset):
             "file_path": file_path
         }
         
-        # 转 tensor 并转成模型需要的格式
         images = torch.from_numpy(images).float()         # (D, 256, 256)
         images = (images - images.min()) / (images.max() - images.min() + 1e-6)
-        images = images.view(1, 1, 256, 256).expand(-1, 3, -1, -1)         # (D, 3, 256, 256)  ← 必须 3 通道！
+        images = images.view(1, 1, 256, 256).expand(-1, 3, -1, -1)         # (D, 3, 256, 256)
         masks = torch.from_numpy(masks).unsqueeze(0).to(torch.uint8)  # (D, 1, 256, 256)
         
-        # Text prompt（保持不变）
         valid_keys = sorted([int(k) for k in text_prompt.keys() if k.isdigit()])
         is_instance = text_prompt.get('instance_label') == 1
         
@@ -284,9 +223,7 @@ class TextSegVal(Dataset):
         return {
             "image": images,
             "mask": masks,
-            # 🌟 将列表合并为由特定分隔符连接的字符串
             "all_prompts": " [SEP] ".join(all_prompts), 
-            # 🌟 将 ID 列表转为 tensor，如果长度不一，这里仍会报错，建议存为字符串
             "prompt_class_ids": ",".join(map(str, prompt_class_ids)),
             "pad_info": pad_info,
             "image_name": pad_info["image_name"]

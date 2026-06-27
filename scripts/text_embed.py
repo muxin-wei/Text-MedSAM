@@ -1,7 +1,5 @@
-import os
 import os.path as osp
 import json
-import numpy as np
 import torch
 from tqdm import tqdm
 from transformers import BertModel, BertTokenizer
@@ -26,7 +24,7 @@ temp_embed = {}
 max_classes = 0
 max_texts = 0
 embed_dim = None
-seq_len = None  # 新增：用于记录序列长度 (通常是256)
+seq_len = None
 
 with torch.no_grad():
     for d_id, (dataset_name, dataset_info) in enumerate(tqdm(data.items(), desc="Encoding Texts")):
@@ -53,19 +51,15 @@ with torch.no_grad():
                 return_tensors="pt",
             ).to(model.device)
 
-            # 获取完整的 last_hidden_state
+            # last_hidden_state
             text_features = model(
                 input_ids=token_ids["input_ids"],
                 attention_mask=token_ids['attention_mask']
             )["last_hidden_state"]
-            
-            # 【修改1】: 删掉 [:, 0]，保留完整的 token 序列
-            # 【修改2】: 务必加上 .cpu()，否则海量的序列特征会撑爆显存
             text_features = text_features.cpu() 
             
             max_texts = max(max_texts, text_features.shape[0])
             if embed_dim is None:
-                # 【修改3】: 此时 shape 为 (num_texts, seq_len, embed_dim)
                 seq_len = text_features.shape[1]
                 embed_dim = text_features.shape[2]
                 
@@ -74,21 +68,19 @@ with torch.no_grad():
             c_id += 1
 
 num_datasets = len(data)
-print(f"\n>>> Finished!")
+print("\n>>> Finished!")
 print(f"  -  (Num_datasets): {num_datasets}")
 print(f"  -  (Max_classes): {max_classes}")
 print(f"  -  (Max_texts): {max_texts}")
 print(f"  -  (Seq_Len): {seq_len}")
 print(f"  -  (Embed_dim): {embed_dim}")
 
-# 【修改4】: 初始化 5D Tensor 以容纳序列长度
 unified_embeds = torch.zeros((num_datasets, max_classes, max_texts, seq_len, embed_dim), dtype=torch.float32)
 valid_text_counts = torch.zeros((num_datasets, max_classes), dtype=torch.long)
 
 for d_id in range(num_datasets):
     for c_id, embeds in temp_embed[d_id].items():
         num_t = embeds.shape[0]
-        # 【修改5】: 赋值时增加序列长度的维度切片
         unified_embeds[d_id, c_id, :num_t, :, :] = embeds
         valid_text_counts[d_id, c_id] = num_t
         

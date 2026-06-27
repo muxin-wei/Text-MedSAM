@@ -9,7 +9,6 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 from utils.helper import instantiate_from_config
-import torchvision.utils as vutils
 
 def get_color_overlay(img, pred, gt):
     if pred.ndim == 3:
@@ -168,7 +167,7 @@ with torch.no_grad():
             
             bbox_raw = np.zeros((img_np.shape[0], img_np.shape[1]), dtype=np.uint8)
             
-            ZOOM = 999999999   # 强制触发
+            ZOOM = 999999999
             
             for i in range(N):
                 current_id = target_ids[i]
@@ -190,10 +189,8 @@ with torch.no_grad():
                     img_rgb = cv2.resize(img_rgb, (gt_w, gt_h))
                
                 text_gt_show = get_color_overlay(img_rgb.copy(), pred_bi.copy(), gt_bi.copy())
-                
-                # <<< 关键修复：GT=0 时用 Pred 补上，确保 zoomin 触发（复用 gt_bi 变量，不改名！）
+        
                 # gt_bi = np.logical_or(gt_bi, pred_bi).astype(np.uint8)
-                
                 pred_show_zoom = add_zoomin_inset(text_gt_show.copy(), gt_bi.copy(), pixel_threshold=ZOOM)
                 
                 heatmaps_show = []

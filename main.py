@@ -1,15 +1,20 @@
-import argparse, os, sys, datetime, glob, importlib
-import torch, warnings
+import argparse
+import os
+import sys
+import datetime
+import glob
+import importlib
+import torch
+import warnings
 import omegaconf
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import lightning.pytorch as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
-from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger, CSVLogger
-from utils import SetupCallback 
+from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from omegaconf import OmegaConf, DictConfig, ListConfig
 
 torch.serialization.safe_globals([omegaconf.base.ContainerMetadata])
 warnings.filterwarnings("ignore")
+
 
 
 def instantiate_from_config(config):
@@ -18,10 +23,13 @@ def instantiate_from_config(config):
     module, cls = target.rsplit(".", 1)
     return getattr(importlib.import_module(module, package=None), cls)(**config.get("params", {}))
 
+def str2bool(v):
+    if isinstance(v, str):
+        return v.lower() in ("yes", "true", "t", "y", "1")
+    return v
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    str2bool = lambda v: v.lower() in ("yes", "true", "t", "y", "1") if isinstance(v, str) else v
     parser.add_argument("-n", "--name", type=str, default="", help="postfix for logdir")
     parser.add_argument("-r", "--resume", type=str, default="", help="resume from logdir or checkpoint")
     parser.add_argument("-b", "--base", nargs="*", default=[], help="base configs (.yaml)")
@@ -202,7 +210,8 @@ def main():
     def divein(*_): 
         if trainer.global_rank == 0:
             print("Received SIGUSR2. Entering debugger.")
-            import pudb; pudb.set_trace()
+            import pudb
+            pudb.set_trace()
             
     import signal
     signal.signal(signal.SIGUSR1, melk)
@@ -215,7 +224,8 @@ def main():
         try: 
             trainer.fit(model, data, ckpt_path=ckpt_path)
         except Exception: 
-            if trainer.global_rank == 0: melk() 
+            if trainer.global_rank == 0:
+                melk() 
             raise
     
     if not opt.no_test and not trainer.interrupted:
@@ -229,7 +239,7 @@ def main():
         if best_ckpt and os.path.exists(best_ckpt):
             # model.test_prefix = "best"
             print(f"[INFO] Testing BEST checkpoint: {best_ckpt}")
-            print(f"[INFO] ========================================\n")
+            print("[INFO] ========================================\n")
             trainer.test(model, data, ckpt_path=best_ckpt, weights_only=False)
         
         # 2. Last Checkpoint

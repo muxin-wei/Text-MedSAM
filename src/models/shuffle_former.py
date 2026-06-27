@@ -1,11 +1,10 @@
 import torch
-from torch import nn, Tensor
+from torch import nn
 from typing import Type
 from torch.nn.init import trunc_normal_
 import torch.nn.functional as F
 from src.models.transformer import Attention
-from src.models.modules import PatchEmbed, MLPBlock, Conv2d_BN, Residual
-from typing import Tuple, List
+from src.models.modules import MLPBlock
 from einops import rearrange
 import numpy as np
 import math
@@ -196,7 +195,7 @@ class TokenShuffle(nn.Module):
     def __init__(
         self,
         dim: int,
-        s: int = 2, # shuffle_sie
+        s: int = 2, # shuffle_size
         n_blocks: int = 2,
         use_fusion: bool = False,
     ):

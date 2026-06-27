@@ -1,9 +1,7 @@
 # %% move files based on csv file
 import numpy as np
-import nibabel as nb
-import os
-from os import listdir, makedirs
-from os.path import basename, join, dirname, isfile, isdir
+from os import listdir
+from os.path import join
 from collections import OrderedDict
 import pandas as pd
 from SurfaceDice import compute_surface_distances, compute_surface_dice_at_tolerance, compute_dice_coefficient

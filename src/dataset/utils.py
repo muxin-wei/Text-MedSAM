@@ -17,16 +17,10 @@ import math
 import cv2
 
 def resize_longest_side_2d(image_2d, target_length=256, mode=cv2.INTER_CUBIC):
-    """
-    缩放单张 2D 图像的最长边
-    输入: (H, W)
-    """
     oldh, oldw = image_2d.shape
-    # 计算缩放比例
     scale = target_length * 1.0 / max(oldh, oldw)
     newh, neww = int(oldh * scale + 0.5), int(oldw * scale + 0.5)
     
-    # 直接缩放，不需要循环
     resized_image = cv2.resize(image_2d, (neww, newh), interpolation=mode)
     
     return resized_image
@@ -48,10 +42,6 @@ def resize_longest_side_3d(image_3d, target_length=256, mode=cv2.INTER_CUBIC):
         
     return resized_volume
 def pad_image_2d(image_2d, target_size=256, pad_val=0):
-    """
-    对 2D 图像的 H, W 进行中心填充到目标尺寸
-    输入: (H, W)
-    """
     h, w = image_2d.shape
     padh = max(0, target_size - h)
     padw = max(0, target_size - w)
@@ -59,13 +49,11 @@ def pad_image_2d(image_2d, target_size=256, pad_val=0):
     if padh == 0 and padw == 0:
         return image_2d
         
-    # 计算上下左右的填充量
     padh_top = padh // 2
     padh_bottom = padh - padh_top
     padw_left = padw // 2
     padw_right = padw - padw_left
     
-    # 2D 填充只需要两组参数 ((top, bottom), (left, right))
     padding = ((padh_top, padh_bottom), (padw_left, padw_right))
     image_padded = np.pad(image_2d, padding, mode='constant', constant_values=pad_val)
     

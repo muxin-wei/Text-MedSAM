@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 from typing import Type, Tuple
+from timm.models.layers import SqueezeExcite
+from timm.models.vision_transformer import trunc_normal_
 
 class MLPBlock(nn.Module): # mlp in Transformer
     def __init__(
@@ -84,26 +86,6 @@ def _make_divisible(v, divisor, min_value=None):
         new_v += divisor
     return new_v
 
-from timm.models.layers import SqueezeExcite
-
-import torch
-
-# From https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py # noqa
-# Itself from https://github.com/facebookresearch/ConvNeXt/blob/d1fa8f6fef0a165b27399986cc2bdacc92777e40/models/convnext.py#L119  # noqa
-class LayerNorm2d(nn.Module):
-    def __init__(self, num_channels: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(num_channels))
-        self.bias = nn.Parameter(torch.zeros(num_channels))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        u = x.mean(1, keepdim=True)
-        s = (x - u).pow(2).mean(1, keepdim=True)
-        x = (x - u) / torch.sqrt(s + self.eps)
-        x = self.weight[:, None, None] * x + self.bias[:, None, None]
-        return x
-    
 class Conv2d_BN(torch.nn.Sequential):
     def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
                  groups=1, bn_weight_init=1, resolution=-10000):
@@ -249,28 +231,27 @@ class RepViTBlock(nn.Module):
     def forward(self, x):
         return self.channel_mixer(self.token_mixer(x))
 
-from timm.models.vision_transformer import trunc_normal_
 class BN_Linear(torch.nn.Sequential):
     def __init__(self, a, b, bias=True, std=0.02):
         super().__init__()
         self.add_module('bn', torch.nn.BatchNorm1d(a))
-        self.add_module('l', torch.nn.Linear(a, b, bias=bias))
+        self.add_module('ln', torch.nn.Linear(a, b, bias=bias))
         trunc_normal_(self.l.weight, std=std)
         if bias:
             torch.nn.init.constant_(self.l.bias, 0)
 
     @torch.no_grad()
     def fuse(self):
-        bn, l = self._modules.values()
+        bn, ln = self._modules.values()
         w = bn.weight / (bn.running_var + bn.eps)**0.5
         b = bn.bias - self.bn.running_mean * \
             self.bn.weight / (bn.running_var + bn.eps)**0.5
-        w = l.weight * w[None, :]
-        if l.bias is None:
-            b = b @ self.l.weight.T
+        w = ln.weight * w[None, :]
+        if ln.bias is None:
+            b = b @ self.ln.weight.T
         else:
-            b = (l.weight @ b[:, None]).view(-1) + self.l.bias
-        m = torch.nn.Linear(w.size(1), w.size(0), device=l.weight.device)
+            b = (ln.weight @ b[:, None]).view(-1) + self.ln.bias
+        m = torch.nn.Linear(w.size(1), w.size(0), device=ln.weight.device)
         m.weight.data.copy_(w)
         m.bias.data.copy_(b)
         return m

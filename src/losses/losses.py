@@ -81,7 +81,6 @@ class ContrastiveLoss(nn.Module):
     
     def forward(self, img_feats: torch.Tensor, text_embed: torch.Tensor, target: torch.Tensor):
         B, C, H, W = img_feats.shape
-        N = H * W
         img_feats = img_feats.flatten(2) # 
         target = target.clone().flatten(2) # [B, 1, N]
         fg_mask = (target > 0.5).float().view(B, 1, -1)
